@@ -144,7 +144,7 @@
         "`make typecheck`, `make test` and `make verify` all exit 0 from a clean clone"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-008.md"
     }
   ]

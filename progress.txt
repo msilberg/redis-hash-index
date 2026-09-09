@@ -87,6 +87,17 @@ something general and reusable — not story-specific details.
 - At SEED_KEYS=50000 a v1 run does NOT show the dramatic latency step — `KEYS` over ~75k keys is
   sub-millisecond. The `processed` counter still crawls (~20 users/sec) which shows the point; the
   four-orders-of-magnitude spike only appears at the 2M+ default fixture. Don't "fix" the UI for it.
+- `make verify` = `node scripts/verify.mjs` (pure Node builtins — no npm deps, target has no
+  node_modules prereq, so it runs from a `git clean -xdf` tree). It drives docker compose + the
+  benchmark HTTP/WS API and shells `docker compose exec -T redis redis-cli`. It ALWAYS runs
+  `docker compose down -v` on exit (a `down()` guard called from both the success path and `die`).
+- Batch users for a run are `u_0000000 .. u_0000999` (userIdFor(0..BATCH_USERS-1)). v2 empties the
+  index set, and Redis auto-deletes a set when its last member is SREM'd — so a completed v2 batch
+  drops DBSIZE by (that block's cache keys) + (BATCH_USERS index keys), exactly. verify.mjs asserts
+  the drop equals the pre-run census of those keys.
+- No browser tooling in this env: `docs/run-legacy.json` / `docs/run-index.json` are captured `/ws`
+  frames, produced by `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>` against an up +
+  seeded stack. README section 3 says so explicitly.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -358,4 +369,42 @@ something general and reusable — not story-specific details.
     `createApp` and needs no Redis / its own DB number.
   - Node 22 has a global `WebSocket` client — handy for driving `/ws` from a one-off `node -e`
     self-check without pulling in the `ws` package.
+---
+
+## 2026-09-09 - US-008
+- Implemented `make verify` and rewrote the README; committed captured run output under `docs/`.
+  - `scripts/verify.mjs` — pure Node builtins (`node:child_process`, global `fetch`/`WebSocket`).
+    Steps: `docker compose up -d --build` → wait every healthcheck → `POST /api/seed`
+    (SEED_KEYS=50000) → poll `/api/seed/status` to `ready` → capture DBSIZE + a census of the
+    batch users' keys (`redis-cli EXISTS` for the 1000 index keys, `redis-cli --scan --pattern`
+    for their cache keys) → `POST /api/run {mode:'v2'}` → watch `/ws` for the `batch` frame's
+    `webhookJobId` → poll `GET :3002/jobs/:id` to `done` → `POST /api/run/stop` → assert every
+    batch cache+index key gone, a control user (`u_<users-1>`) still has its cache via
+    `GET :3001/entitlement/:id`, and `DBSIZE` dropped by exactly the pre-run census → always
+    `docker compose down -v`. Exits non-zero on any failure (`die()` → `down()` → exit 1).
+  - `scripts/capture-run.mjs` — `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>`:
+    connects `/ws`, `POST /api/run`, records frames for N seconds, `POST /api/run/stop`, writes a
+    JSON summary. Produces `docs/run-index.json` / `docs/run-legacy.json`.
+  - `Makefile` `verify` target: `SEED_KEYS=$${SEED_KEYS:-50000} node scripts/verify.mjs` (was a
+    stub that exited 1). No `node_modules` prereq.
+  - `README.md` — rewritten around a visitor's path: what it shows, quick start, what each run
+    looks like (+ the committed samples and the caveat that 50k hides the latency spike), costs
+    table, why v1 doesn't finish (+ the baseline numbers), plain caveats, doc links (incl. the two
+    run JSONs), `make verify` / `make typecheck` / `make test`, and the Ralph build loop.
+- Files changed: scripts/{verify,capture-run}.mjs (new), Makefile, README.md,
+  docs/run-{index,legacy}.json (new), prd.json, progress.txt.
+- Self-check executed: `git clean -xdf` (removed node_modules + dist) then `make verify` →
+  full build, seed ready (49961 cache + 25000 index), v2 job `done processed:1000 removed:2011`,
+  DBSIZE 74962 → 71951 (dropped 3011 = 2011 cache + 1000 index, exactly), `down -v`, `VERIFY OK`,
+  exit 0. Then `npm install && make typecheck` (exit 0) and `make test` (cache 12, test-api 4,
+  webhook 5, benchmark 24 — all pass, exit 0). Run samples captured at SEED_KEYS=50000: v2 flat
+  3–44 ms, v1 `processed` crawls 23 → 547 over 25 s with latency still sub-100 ms (expected at
+  this fixture size — see Codebase Patterns).
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (verify.mjs shape / always-down / exact DBSIZE-drop
+    assertion; the captured-frames artifacts).
+  - Browser rendering of the chart is still NOT machine-verified in this environment. The UI JS is
+    dependency-free vanilla and every server-side path is covered; a human should still eyeball the
+    canvas once. The README is explicit that the committed run output is frames, not screenshots.
+  - This was the last story — all eight `passes: true`.
 ---
