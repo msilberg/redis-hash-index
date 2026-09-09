@@ -52,6 +52,19 @@ something general and reusable — not story-specific details.
   v1 therefore leaves index sets behind (they TTL out); only v2 empties them via `SREM`.
 - Service tests: live HTTP via `createApp(redis)` on `app.listen(0)` + global `fetch`; modules are
   `commonjs` so use `__dirname`, never `import.meta.url`.
+- `node:test` has NO default per-test timeout: a promise that never resolves hangs `make test`
+  forever (looks like a slow suite). Two ways this bites: (a) `server.close()` waits on undici
+  keep-alive sockets from `fetch` — call `server.closeAllConnections()` first; (b) awaiting
+  `once(emitter, "done")` after triggering fast async work that already emitted — poll state instead.
+- benchmark service = Express app + `http.Server` + `ws` at `/ws`. `createApp({seeder})` returns the
+  app; `attachWebSocket(server, seeder)` returns a hub with `broadcast` (US-006/007 reuse it).
+- The seeder is deterministic from `SEED_VALUE` (mulberry32 + an order-independent `hashInt`).
+  `services/benchmark/src/fixture.ts` is the single generator — changing it diverges every fixture.
+- Seeder writes with `flushdb()` first, then asserts `DBSIZE === cacheKeys + indexKeys` BEFORE
+  writing `seed::marker`. So live DBSIZE after a completed seed is that total **+ 1** (the marker).
+- `SEED_KEYS` counts cache *records*; users ≈ SEED_KEYS/2 (`averageVariants` = 2). Actual cacheKeys
+  is the sum of `1+(hash(i)%3)` and lands a hair under SEED_KEYS — status/marker report the real count.
+- Compose forwards `SEED_KEYS`/`SEED_VALUE` from the shell env, so `SEED_KEYS=50000 make up` works.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -176,4 +189,52 @@ something general and reusable — not story-specific details.
   - `npm install` reported "up to date" after adding webhook deps — express/ioredis/tsx were
     already deduped from test-api — but package-lock.json still gained the webhook workspace refs.
   - `redis.unlink()` with zero args throws; the batch loop skips empty match lists naturally.
+---
+
+## 2026-09-09 - US-005
+- Implemented `services/benchmark` — the deterministic seeder + its API and WebSocket.
+  - `src/prng.ts` — `mulberry32` (float stream) + `hashInt` (order-independent integer avalanche,
+    salted by `SEED_VALUE`). No dependency.
+  - `src/fixture.ts` — the single fixture generator: `userCount` (≈ SEED_KEYS/2), `userIdFor`
+    (`u_` + 7 digits), `variantsFor` (`1 + hash%3`), `expectedTotals`, and `generateUsers` yielding
+    `{userId, indexKey, records:[{cacheKey,value}]}`. Cache key = `test-api::demo::activeSubscription::
+    <userId>::{"v":N}`; value = `{userId,planId,status,renewsAt,seats}` (planId cycled over the four
+    plans, seats/renewsAt from the hash). Index key comes from `EntityIndex.indexKeyFor`.
+  - `src/seeder.ts` — `Seeder` (EventEmitter) state machine `idle|seeding|ready|failed`.
+    `start()` runs in the background: `flushdb`, then pipelines of ~20k commands
+    (`SET ... EX 3600`, `SADD` all members, `EXPIRE NX`, `EXPIRE GT`), inspecting **every** reply
+    tuple (error ⇒ abort ⇒ `failed`). On completion asserts `DBSIZE === cacheKeys + indexKeys`
+    BEFORE writing `seed::marker` (JSON of counts + completedAt). `init()` loads the marker so a
+    restart reports `ready` without reseeding. `reset()` = `flushdb` + back to `idle`. Emits
+    `{t:'seed-progress',done,total,percent}` on a 1s `setInterval` plus at start/finish.
+  - `src/app.ts` — `GET /health`, `GET /`, `GET /api/seed/status`, `POST /api/seed` (202, or 409
+    while seeding), `POST /api/seed/reset`.
+  - `src/ws.ts` — `attachWebSocket(server, seeder)` → hub with `broadcast`; forwards `progress`
+    events to `/ws` clients and sends a snapshot frame on connect.
+  - `src/index.ts` — own ioredis connection, `http.Server` + ws, SIGTERM/SIGINT drain.
+  - `Dockerfile` mirrors the other services; `docker-compose.yml` gains `benchmark` on 3000 with a
+    node-fetch healthcheck and `SEED_KEYS`/`SEED_VALUE` env passthrough.
+- Tests (`src/fixture.test.ts` pure, `src/seeder.test.ts` real Redis DB 15): PRNG determinism,
+  fixture byte-identity (same seed) / divergence (different seed), key/value shape, full seed +
+  DBSIZE + marker, armed TTL on both string and set (NX/GT), reseed byte-identity, `init()` from a
+  marker, `reset`, concurrent-`start` rejection, a pipeline error ⇒ `failed`, the HTTP 202/409 flow,
+  and WS `seed-progress` frames ending at percent 1. 16/16.
+- Files changed: services/benchmark/{package.json,Dockerfile,tsconfig.json,src/{config,prng,fixture,
+  seeder,app,ws,index}.ts,src/{fixture,seeder}.test.ts}, docker-compose.yml, services/CLAUDE.md,
+  package.json/package-lock.json (added `ws` + `@types/ws`), prd.json, progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` exit 0 (cache 12, test-api 4, webhook 5,
+  benchmark 16); `SEED_KEYS=50000 make up` → benchmark healthy; `POST /api/seed` → `ready` in ~1.3s
+  (< 30s), status `progress:1 users:25000 cacheKeys:49961 indexKeys:25000`; DBSIZE 74962 =
+  49961+25000+1 (marker); reseed → byte-identical value + identical DBSIZE; `seed::marker` present;
+  `POST /api/seed/reset` → DBSIZE 0, status `idle`; second `POST /api/seed` mid-seed → 409;
+  `docker compose restart benchmark` → status `ready` (no reseed); a live `/ws` client received
+  `{t:'seed-progress'}` frames.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (node:test has no timeout; closeAllConnections;
+    poll-don't-race; deterministic seeder; DBSIZE is total + 1 for the marker).
+  - A 50k seed finishes in ~1s, faster than the 1s progress ticker — you only see start/finish
+    frames at that size. The default 2M seed is where the per-second frames matter.
+  - `EXPIRE key ttl "NX"|"GT"` works through an ioredis *pipeline* (not just multi), replies inspected.
+  - US-006 run driver can `import { attachWebSocket }` / reuse `hub.broadcast` for `sample` frames,
+    and draw eviction user ids from `userIdFor(0..userCount-1)`.
 ---

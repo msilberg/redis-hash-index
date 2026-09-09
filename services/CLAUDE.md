@@ -29,6 +29,24 @@ never `await` it in the handler.
 `test-api` must never enumerate the keyspace, so don't write `KEYS`/`scan(` even in its comments.
 `webhook`'s v1 path *is* the legacy scan — `redis.keys('*::<userId>::*')` is deliberate there.
 
+## benchmark
+
+- It is not just an Express app: `src/index.ts` builds an `http.Server` so `ws` can attach at
+  `/ws`. `createApp({ seeder })` returns the app; `attachWebSocket(server, seeder)` returns a hub
+  whose `broadcast` the run driver (US-006) reuses. Tests drive both via `createServer(app)`.
+- The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,
+  cache keys and values; `hashInt` is order-independent so `variantsFor(i)` never depends on
+  iteration. Change the generator and every existing fixture / marker silently diverges.
+- The seeder `flushdb()`s before writing, asserts `DBSIZE === cacheKeys + indexKeys` **before**
+  writing `seed::marker`, so the live DBSIZE after a completed seed is that total **+ 1**.
+- `seeder.init()` (called once at boot) loads the marker so status reports `ready` after a restart
+  without reseeding. Nothing reseeds automatically.
+- Compose passes `SEED_KEYS` / `SEED_VALUE` through from the shell env
+  (`SEED_KEYS: "${SEED_KEYS:-2000000}"`), so `SEED_KEYS=50000 make up` works.
+- Test gotcha: Node's global `fetch` (undici) keeps sockets alive, so `server.close()` hangs —
+  call `server.closeAllConnections()` first. And a fast seed can emit `done` before an
+  `once(seeder,"done")` listener attaches; poll `seeder.status()` instead of racing the event.
+
 ## Tests
 
 `node --import tsx --test "src/**/*.test.ts"`, `node:test` + `node:assert/strict`, real Redis on
