@@ -4,6 +4,10 @@ Started: (not yet run)
 
 ## Codebase Patterns
 
+- For the 1 Hz chart, request `getContext("2d", { willReadFrequently: true })` to prefer
+  software rendering. Chrome's accelerated canvas failed to display the chart on this machine;
+  switching the context restored full redraws. Verify canvas changes visually in Chrome.
+
 Seeded from the specification before the first iteration. Add to this section whenever you learn
 something general and reusable — not story-specific details.
 
@@ -407,4 +411,22 @@ something general and reusable — not story-specific details.
     dependency-free vanilla and every server-side path is covered; a human should still eyeball the
     canvas once. The README is explicit that the committed run output is frames, not screenshots.
   - This was the last story — all eight `passes: true`.
+---
+
+## 2026-09-09 22:54 +03:00 - US-007 follow-up: Chrome chart history
+- Fixed Chrome chart rendering by requesting a software-backed 2D canvas with
+  `willReadFrequently: true`. The sample accumulation and full-history redraw logic were
+  already present; changing the context restored the visible chart in Chrome.
+- Files changed: services/benchmark/src/ui.ts, services/benchmark/src/ui.test.ts, progress.txt.
+- Verification: rebuilt only the benchmark container at localhost:3000; Chrome initially
+  showed a blank canvas while live status advanced. After the fix, the legacy run displayed
+  its baseline and full multi-point seconds-scale trace, including after a mid-run reload.
+  An index run retained 21 seconds of points and reached 1000/1000 done. Both runs were stopped
+  using the UI. `make typecheck`, `make test` (45 tests), and `git diff --check` passed.
+- **Learnings for future iterations:**
+  - The before/after result points to Chrome's accelerated canvas rendering on this machine;
+    the specific GPU/driver defect was not identified. Canvas behavior needs visual browser
+    checks; the existing HTML and WebSocket tests cannot detect missing painted pixels.
+  - Kept the existing fix/chrome-graph-bug-v2 branch for this requested bug fix; all original
+    PRD stories were already marked passing, so no PRD status changes were necessary.
 ---

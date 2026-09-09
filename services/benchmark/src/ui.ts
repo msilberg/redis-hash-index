@@ -94,7 +94,9 @@ export const UI_HTML = `<!doctype html>
   var C_V1 = "#e5554e", C_V2 = "#3fb27f", C_BATCH = "#e5a13d";
 
   var chart = document.getElementById("chart");
-  var ctx = chart.getContext("2d");
+  // Prefer a software-backed canvas: accelerated Chrome canvases can lose chart pixels
+  // between redraws on some GPU/driver combinations. This small 1 Hz chart needs no GPU.
+  var ctx = chart.getContext("2d", { willReadFrequently: true });
 
   var state = {
     conn: "connecting",
