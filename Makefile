@@ -28,8 +28,7 @@ reset:
 	curl -fsS -XPOST localhost:3000/api/seed/reset || true
 
 verify:
-	@echo "make verify is implemented in US-008" >&2
-	@exit 1
+	SEED_KEYS=$${SEED_KEYS:-50000} node scripts/verify.mjs
 
 node_modules: package.json
 	npm install
