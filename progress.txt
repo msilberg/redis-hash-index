@@ -33,7 +33,8 @@ something general and reusable — not story-specific details.
 - Tests run on `node --import tsx --test "src/**/*.test.ts"` (Node 24, tsx devDep). Use `node:test` +
   `node:assert/strict`. `make test` now does `docker compose up -d redis` first — every service's
   tests need a real Redis, per the spec (no mocks).
-- Import sibling modules WITHOUT a `.js` extension (`./index`), tsconfig uses `moduleResolution: node`.
+- Shared tsconfig uses matching `module: Node16` / `moduleResolution: Node16`. Packages without
+  `type: module` still emit CommonJS and support extensionless sibling imports (`./index`).
 - Consumers of `packages/cache` pass their ioredis client where `RedisClient` is expected and cast
   (`redis as unknown as RedisClient`) — the narrow interface is intentional, don't widen it.
 - `EntityIndex.parse` returns `null` for a foreign/malformed key (never throws); `indexKeyFor` and
@@ -429,4 +430,19 @@ something general and reusable — not story-specific details.
     checks; the existing HTML and WebSocket tests cannot detect missing painted pixels.
   - Kept the existing fix/chrome-graph-bug-v2 branch for this requested bug fix; all original
     PRD stories were already marked passing, so no PRD status changes were necessary.
+---
+
+## 2026-09-09 - US-001 follow-up: modern TypeScript module resolution
+- Replaced the shared legacy moduleResolution node (alias node10) with Node16 and paired
+  module: Node16. All four workspace tsconfigs inherit the fix. Existing packages remain
+  CommonJS; verified the emitted benchmark entry point still uses CommonJS exports.
+- Files changed: tsconfig.base.json, progress.txt.
+- Verification: make typecheck, all workspace builds, make test (45 passing), and
+  git diff --check passed with the installed TypeScript 5.9.3.
+- **Learnings for future iterations:**
+  - The reported ts(5108) is a TypeScript language-server diagnostic, not ESLint. A newer
+    editor compiler can reject settings accepted by the workspace compiler; node/node10
+    resolution is deprecated in TypeScript 6 and removed in TypeScript 7.
+  - Node16 resolution requires a compatible module setting; changing only moduleResolution
+    while leaving module: commonjs is not a valid migration.
 ---
