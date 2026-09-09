@@ -39,7 +39,7 @@ test("the page is self-contained: no build step, no CDN dependency", () => {
 });
 
 test("the chart is a canvas with a logarithmic y axis and a dispatch marker", () => {
-  assert.match(UI_HTML, /getContext\("2d"\)/);
+  assert.match(UI_HTML, /getContext\("2d",/);
   assert.match(UI_HTML, /Math\.log\(/); // log-scale projection
   assert.match(UI_HTML, /Math\.LN10/);
   assert.match(UI_HTML, /eviction batch dispatched/);
