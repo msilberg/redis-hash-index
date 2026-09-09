@@ -1,0 +1,230 @@
+{
+  "mode": "v2",
+  "capturedSeconds": 12,
+  "capturedAt": "2026-09-09T14:43:49.548Z",
+  "note": "WebSocket frames from one demo run. Sample output committed in lieu of a browser screenshot (no browser tooling in the build environment). x = elapsedSec, y = latencyMs (log scale in the UI).",
+  "frameCounts": {
+    "seed-progress": 1,
+    "run-started": 1,
+    "sample": 12,
+    "batch": 1,
+    "run-stopped": 1
+  },
+  "latencyMsRange": [
+    3.168603,
+    43.66101
+  ],
+  "frames": [
+    {
+      "t": "seed-progress",
+      "done": 74961,
+      "total": 74961,
+      "percent": 1
+    },
+    {
+      "t": "run-started",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965017005
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965017052,
+      "elapsedSec": 0,
+      "latencyMs": 43.66101,
+      "serverLatencyMs": 0.954991,
+      "ok": true,
+      "job": null
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965018068,
+      "elapsedSec": 1,
+      "latencyMs": 7.875881,
+      "serverLatencyMs": 1.975849,
+      "ok": true,
+      "job": null
+    },
+    {
+      "t": "batch",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "webhookJobId": "job_65f466a5",
+      "count": 1000,
+      "ts": 1788965018074,
+      "elapsedSec": 1
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965019077,
+      "elapsedSec": 2,
+      "latencyMs": 3.574751,
+      "serverLatencyMs": 0.338531,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965020098,
+      "elapsedSec": 3,
+      "latencyMs": 10.276035,
+      "serverLatencyMs": 2.736546,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965021111,
+      "elapsedSec": 4,
+      "latencyMs": 5.941436,
+      "serverLatencyMs": 1.020702,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965022127,
+      "elapsedSec": 5,
+      "latencyMs": 8.19318,
+      "serverLatencyMs": 0.92894,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965023135,
+      "elapsedSec": 6,
+      "latencyMs": 3.168603,
+      "serverLatencyMs": 0.515211,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965024143,
+      "elapsedSec": 7,
+      "latencyMs": 4.274277,
+      "serverLatencyMs": 0.564191,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965025156,
+      "elapsedSec": 8,
+      "latencyMs": 5.979645,
+      "serverLatencyMs": 0.733173,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965026168,
+      "elapsedSec": 9,
+      "latencyMs": 5.808605,
+      "serverLatencyMs": 0.675454,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965027180,
+      "elapsedSec": 10,
+      "latencyMs": 5.526153,
+      "serverLatencyMs": 0.765885,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965028192,
+      "elapsedSec": 11,
+      "latencyMs": 5.606466,
+      "serverLatencyMs": 0.690275,
+      "ok": true,
+      "job": {
+        "processed": 1000,
+        "total": 1000,
+        "removed": 2011,
+        "state": "done"
+      }
+    },
+    {
+      "t": "run-stopped",
+      "runId": "run_6ba23ca9",
+      "mode": "v2",
+      "ts": 1788965029044,
+      "webhookJobId": "job_65f466a5",
+      "webhookState": "done"
+    }
+  ]
+}

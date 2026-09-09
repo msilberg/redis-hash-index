@@ -17,7 +17,7 @@
         "README section 'Quick start' documents make up / make seed / open localhost:3000"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-001.md"
     },
     {
@@ -35,7 +35,7 @@
         "`make typecheck` and `make test` both exit 0"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-002.md"
     },
     {
@@ -53,7 +53,7 @@
         "`make typecheck` exits 0"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-003.md"
     },
     {
@@ -71,7 +71,7 @@
         "`make typecheck` and `make test` exit 0"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-004.md"
     },
     {
@@ -90,7 +90,7 @@
         "`make typecheck` exits 0"
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-005.md"
     },
     {
@@ -109,7 +109,7 @@
         "`make typecheck` and `make test` exit 0"
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-006.md"
     },
     {
@@ -128,7 +128,7 @@
         "Verified in a browser: both runs start, the chart moves, Stop halts it"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-007.md"
     },
     {
@@ -144,7 +144,7 @@
         "`make typecheck`, `make test` and `make verify` all exit 0 from a clean clone"
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-008.md"
     }
   ]

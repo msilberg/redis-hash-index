@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+.git
+.github
+archive
+docs
+tasks
+*.md
+!README.md
+progress.txt
+prd.json

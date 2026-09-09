@@ -1,0 +1,72 @@
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory-policy", "noeviction", "--save", "", "--appendonly", "no"]
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  benchmark:
+    build:
+      context: .
+      dockerfile: services/benchmark/Dockerfile
+    ports: ["3000:3000"]
+    environment:
+      PORT: "3000"
+      REDIS_URL: redis://redis:6379
+      SEED_KEYS: "${SEED_KEYS:-2000000}"
+      SEED_VALUE: "${SEED_VALUE:-1}"
+      TEST_API_URL: http://test-api:3001
+      WEBHOOK_URL: http://webhook:3002
+    depends_on:
+      redis:
+        condition: service_healthy
+      test-api:
+        condition: service_healthy
+      webhook:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  test-api:
+    build:
+      context: .
+      dockerfile: services/test-api/Dockerfile
+    ports: ["3001:3001"]
+    environment:
+      PORT: "3001"
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  webhook:
+    build:
+      context: .
+      dockerfile: services/webhook/Dockerfile
+    ports: ["3002:3002"]
+    environment:
+      PORT: "3002"
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

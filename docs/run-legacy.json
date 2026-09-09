@@ -1,0 +1,438 @@
+{
+  "mode": "v1",
+  "capturedSeconds": 25,
+  "capturedAt": "2026-09-09T14:44:22.646Z",
+  "note": "WebSocket frames from one demo run. Sample output committed in lieu of a browser screenshot (no browser tooling in the build environment). x = elapsedSec, y = latencyMs (log scale in the UI).",
+  "frameCounts": {
+    "seed-progress": 1,
+    "run-started": 1,
+    "sample": 25,
+    "batch": 1,
+    "run-stopped": 1
+  },
+  "latencyMsRange": [
+    3.921232,
+    72.525412
+  ],
+  "frames": [
+    {
+      "t": "seed-progress",
+      "done": 74961,
+      "total": 74961,
+      "percent": 1
+    },
+    {
+      "t": "run-started",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965037130
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965037135,
+      "elapsedSec": 0,
+      "latencyMs": 3.921232,
+      "serverLatencyMs": 0.553142,
+      "ok": true,
+      "job": null
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965038143,
+      "elapsedSec": 1,
+      "latencyMs": 6.758482,
+      "serverLatencyMs": 1.492576,
+      "ok": true,
+      "job": null
+    },
+    {
+      "t": "batch",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "webhookJobId": "job_32d2ca90",
+      "count": 1000,
+      "ts": 1788965038145,
+      "elapsedSec": 1
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965039161,
+      "elapsedSec": 2,
+      "latencyMs": 15.890948,
+      "serverLatencyMs": 13.417938,
+      "ok": true,
+      "job": {
+        "processed": 23,
+        "total": 1000,
+        "removed": 41,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965040190,
+      "elapsedSec": 3,
+      "latencyMs": 25.58554,
+      "serverLatencyMs": 23.067858,
+      "ok": true,
+      "job": {
+        "processed": 46,
+        "total": 1000,
+        "removed": 87,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965041207,
+      "elapsedSec": 4,
+      "latencyMs": 14.410375,
+      "serverLatencyMs": 12.06627,
+      "ok": true,
+      "job": {
+        "processed": 69,
+        "total": 1000,
+        "removed": 135,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965042282,
+      "elapsedSec": 5,
+      "latencyMs": 72.525412,
+      "serverLatencyMs": 70.041468,
+      "ok": true,
+      "job": {
+        "processed": 94,
+        "total": 1000,
+        "removed": 187,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965043323,
+      "elapsedSec": 6,
+      "latencyMs": 38.307748,
+      "serverLatencyMs": 35.684618,
+      "ok": true,
+      "job": {
+        "processed": 118,
+        "total": 1000,
+        "removed": 238,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965044357,
+      "elapsedSec": 7,
+      "latencyMs": 31.650872,
+      "serverLatencyMs": 29.304147,
+      "ok": true,
+      "job": {
+        "processed": 142,
+        "total": 1000,
+        "removed": 290,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965045404,
+      "elapsedSec": 8,
+      "latencyMs": 44.382035,
+      "serverLatencyMs": 42.051719,
+      "ok": true,
+      "job": {
+        "processed": 166,
+        "total": 1000,
+        "removed": 336,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965046437,
+      "elapsedSec": 9,
+      "latencyMs": 30.038036,
+      "serverLatencyMs": 27.661989,
+      "ok": true,
+      "job": {
+        "processed": 190,
+        "total": 1000,
+        "removed": 382,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965047460,
+      "elapsedSec": 10,
+      "latencyMs": 20.726995,
+      "serverLatencyMs": 18.405573,
+      "ok": true,
+      "job": {
+        "processed": 214,
+        "total": 1000,
+        "removed": 442,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965048505,
+      "elapsedSec": 11,
+      "latencyMs": 42.294508,
+      "serverLatencyMs": 39.881601,
+      "ok": true,
+      "job": {
+        "processed": 238,
+        "total": 1000,
+        "removed": 487,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965049529,
+      "elapsedSec": 12,
+      "latencyMs": 21.23149,
+      "serverLatencyMs": 18.868697,
+      "ok": true,
+      "job": {
+        "processed": 262,
+        "total": 1000,
+        "removed": 534,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965050555,
+      "elapsedSec": 13,
+      "latencyMs": 23.782067,
+      "serverLatencyMs": 21.339867,
+      "ok": true,
+      "job": {
+        "processed": 285,
+        "total": 1000,
+        "removed": 577,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965051589,
+      "elapsedSec": 14,
+      "latencyMs": 30.624117,
+      "serverLatencyMs": 28.216333,
+      "ok": true,
+      "job": {
+        "processed": 309,
+        "total": 1000,
+        "removed": 623,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965052606,
+      "elapsedSec": 15,
+      "latencyMs": 13.564126,
+      "serverLatencyMs": 11.333265,
+      "ok": true,
+      "job": {
+        "processed": 333,
+        "total": 1000,
+        "removed": 670,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965053642,
+      "elapsedSec": 17,
+      "latencyMs": 33.291017,
+      "serverLatencyMs": 31.836862,
+      "ok": true,
+      "job": {
+        "processed": 357,
+        "total": 1000,
+        "removed": 724,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965054665,
+      "elapsedSec": 18,
+      "latencyMs": 19.128193,
+      "serverLatencyMs": 16.686781,
+      "ok": true,
+      "job": {
+        "processed": 381,
+        "total": 1000,
+        "removed": 763,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965055716,
+      "elapsedSec": 19,
+      "latencyMs": 47.582812,
+      "serverLatencyMs": 44.778957,
+      "ok": true,
+      "job": {
+        "processed": 405,
+        "total": 1000,
+        "removed": 810,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965056736,
+      "elapsedSec": 20,
+      "latencyMs": 17.042988,
+      "serverLatencyMs": 14.420764,
+      "ok": true,
+      "job": {
+        "processed": 428,
+        "total": 1000,
+        "removed": 855,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965057767,
+      "elapsedSec": 21,
+      "latencyMs": 27.298176,
+      "serverLatencyMs": 24.789319,
+      "ok": true,
+      "job": {
+        "processed": 452,
+        "total": 1000,
+        "removed": 902,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965058795,
+      "elapsedSec": 22,
+      "latencyMs": 25.033132,
+      "serverLatencyMs": 22.601643,
+      "ok": true,
+      "job": {
+        "processed": 476,
+        "total": 1000,
+        "removed": 949,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965059817,
+      "elapsedSec": 23,
+      "latencyMs": 18.59657,
+      "serverLatencyMs": 16.224984,
+      "ok": true,
+      "job": {
+        "processed": 500,
+        "total": 1000,
+        "removed": 995,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965060828,
+      "elapsedSec": 24,
+      "latencyMs": 7.929299,
+      "serverLatencyMs": 5.701311,
+      "ok": true,
+      "job": {
+        "processed": 523,
+        "total": 1000,
+        "removed": 1046,
+        "state": "running"
+      }
+    },
+    {
+      "t": "sample",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965061865,
+      "elapsedSec": 25,
+      "latencyMs": 33.734974,
+      "serverLatencyMs": 31.884267,
+      "ok": true,
+      "job": {
+        "processed": 547,
+        "total": 1000,
+        "removed": 1092,
+        "state": "running"
+      }
+    },
+    {
+      "t": "run-stopped",
+      "runId": "run_bb413f77",
+      "mode": "v1",
+      "ts": 1788965062142,
+      "webhookJobId": "job_32d2ca90",
+      "webhookState": "stopped"
+    }
+  ]
+}

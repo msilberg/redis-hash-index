@@ -18,3 +18,393 @@ something general and reusable — not story-specific details.
 - Redis runs with `--maxmemory-policy noeviction`. If it evicts the fixture, the benchmark lies.
 - Every Redis pipeline reply must be inspected. A silently dropped `SET` shrinks the keyspace and
   flatters the wrong side of the comparison.
+- This dev machine has NO local `redis-cli`. Use `docker compose exec -T redis redis-cli ...`
+  (or `docker run --rm --network host redis:7-alpine redis-cli -h localhost ...`) in scripts and
+  self-checks instead of assuming a host binary.
+- npm workspaces: root `package.json` has `workspaces: [packages/cache, services/*]`, each workspace
+  has its own `tsconfig.json` extending `tsconfig.base.json` and a `typecheck` script. `make typecheck`
+  / `make test` fan out with `npm run <x> --workspaces --if-present`.
+- `make up` waits for health via `docker inspect --format '{{.State.Health.Status}}'` on
+  `docker compose ps -q` — no `jq` dependency.
+- Tests run on `node --import tsx --test "src/**/*.test.ts"` (Node 24, tsx devDep). Use `node:test` +
+  `node:assert/strict`. `make test` now does `docker compose up -d redis` first — every service's
+  tests need a real Redis, per the spec (no mocks).
+- Import sibling modules WITHOUT a `.js` extension (`./index`), tsconfig uses `moduleResolution: node`.
+- Consumers of `packages/cache` pass their ioredis client where `RedisClient` is expected and cast
+  (`redis as unknown as RedisClient`) — the narrow interface is intentional, don't widen it.
+- `EntityIndex.parse` returns `null` for a foreign/malformed key (never throws); `indexKeyFor` and
+  `register` throw on bad segments / unknown category.
+- `packages/cache` has a `prepare` script (`tsc`): a root `npm install` builds its `dist/`, so
+  service workspaces typecheck/test against `dist/index.d.ts` with no manual build. Keep `main`/
+  `types` at `dist/`; services `require()` the compiled JS.
+- Service Dockerfiles: build context is the REPO ROOT (`context: .`), multi-stage — stage 1 copies
+  root manifests + every workspace `package.json` + the service source, `npm ci` (runs cache's
+  `prepare`), `npm run build --workspace <svc>`, `npm prune --omit=dev`; stage 2 copies
+  `node_modules` + `packages/cache/dist` + `services/<svc>/dist`. Runtime = `node dist/index.js`,
+  no tsx in prod. Compose healthcheck uses `node -e "fetch(...health...)"` — the image has no curl.
+- Self-checks that `grep` the service source for `KEYS`/`scan(` will match your OWN comments too.
+  Don't write those literal tokens in `services/*/src` — say "enumerate the keyspace" instead.
+  EXCEPTION: `services/webhook` v1 path legitimately calls `redis.keys('*::<userId>::*')`.
+- Services that accept a JSON body need `app.use(express.json())`. Long work: `void runJob(...)`
+  then `res.status(202)` immediately; the worker owns all its own error handling and sets
+  `job.state`. Job store is an in-memory `Map` created INSIDE `createApp` so tests are isolated.
+- The v1 KEYS pattern keeps both `::` so it never matches the index key (name ends at the id).
+  v1 therefore leaves index sets behind (they TTL out); only v2 empties them via `SREM`.
+- Service tests: live HTTP via `createApp(redis)` on `app.listen(0)` + global `fetch`; modules are
+  `commonjs` so use `__dirname`, never `import.meta.url`.
+- `node:test` has NO default per-test timeout: a promise that never resolves hangs `make test`
+  forever (looks like a slow suite). Two ways this bites: (a) `server.close()` waits on undici
+  keep-alive sockets from `fetch` — call `server.closeAllConnections()` first; (b) awaiting
+  `once(emitter, "done")` after triggering fast async work that already emitted — poll state instead.
+- benchmark service = Express app + `http.Server` + `ws` at `/ws`. `createApp({seeder})` returns the
+  app; `attachWebSocket(server, seeder)` returns a hub with `broadcast` (US-006/007 reuse it).
+- The seeder is deterministic from `SEED_VALUE` (mulberry32 + an order-independent `hashInt`).
+  `services/benchmark/src/fixture.ts` is the single generator — changing it diverges every fixture.
+- Seeder writes with `flushdb()` first, then asserts `DBSIZE === cacheKeys + indexKeys` BEFORE
+  writing `seed::marker`. So live DBSIZE after a completed seed is that total **+ 1** (the marker).
+- `SEED_KEYS` counts cache *records*; users ≈ SEED_KEYS/2 (`averageVariants` = 2). Actual cacheKeys
+  is the sum of `1+(hash(i)%3)` and lands a hair under SEED_KEYS — status/marker report the real count.
+- Compose forwards `SEED_KEYS`/`SEED_VALUE` from the shell env, so `SEED_KEYS=50000 make up` works.
+- Node's test runner runs each `*.test.ts` file in a PARALLEL child process. Two files that both hit
+  real Redis and `flushdb` will clobber each other — give each redis-touching test file its own DB
+  number (seeder.test.ts = 15, runner.test.ts = 14). Watch this as more services add such tests.
+- A test `before`/`beforeEach` that does `await once(emitter, "done")` HANGS the whole file forever
+  if the operation emits `failed` instead (node:test has no timeout). Race both:
+  `new Promise((res,rej) => { e.once("done",res); e.once("failed",m=>rej(new Error(m))); })`.
+- benchmark `createApp` now takes `{ seeder, runner }` and `attachWebSocket(server, seeder, runner)`
+  takes the runner too. The `Runner` (EventEmitter, emits `frame`) is the US-006 run driver; the ws
+  hub broadcasts its frames and sends `runner.historyFrame()` to a client connecting mid-run.
+- The run driver reaches test-api / webhook over HTTP by container name (`TEST_API_URL` /
+  `WEBHOOK_URL`, default `http://test-api:3001` / `http://webhook:3002`). It does NOT share their
+  Redis connection — it only speaks their public API.
+- express.json() default body limit is 100kb (~9000 `u_ddddddd` ids). BATCH_USERS default 1000 is
+  well under; if a future story raises it past ~8000 the webhook needs `express.json({limit})`.
+- The benchmark UI (US-007) is `services/benchmark/src/ui.ts` exporting `UI_HTML` as a string
+  (served by `GET /`), NOT a static file — the Dockerfile only copies `dist/`. Keep it CDN-free,
+  framework-free, one `<canvas>` chart in plain JS. The `{t:'seed-progress'}` frame carries only
+  done/total/percent, so the page also polls `GET /api/seed/status` for the seed `state`
+  (`ready`/`seeding`/`idle`) that gates the run buttons.
+- At SEED_KEYS=50000 a v1 run does NOT show the dramatic latency step — `KEYS` over ~75k keys is
+  sub-millisecond. The `processed` counter still crawls (~20 users/sec) which shows the point; the
+  four-orders-of-magnitude spike only appears at the 2M+ default fixture. Don't "fix" the UI for it.
+- `make verify` = `node scripts/verify.mjs` (pure Node builtins — no npm deps, target has no
+  node_modules prereq, so it runs from a `git clean -xdf` tree). It drives docker compose + the
+  benchmark HTTP/WS API and shells `docker compose exec -T redis redis-cli`. It ALWAYS runs
+  `docker compose down -v` on exit (a `down()` guard called from both the success path and `die`).
+- Batch users for a run are `u_0000000 .. u_0000999` (userIdFor(0..BATCH_USERS-1)). v2 empties the
+  index set, and Redis auto-deletes a set when its last member is SREM'd — so a completed v2 batch
+  drops DBSIZE by (that block's cache keys) + (BATCH_USERS index keys), exactly. verify.mjs asserts
+  the drop equals the pre-run census of those keys.
+- No browser tooling in this env: `docs/run-legacy.json` / `docs/run-index.json` are captured `/ws`
+  frames, produced by `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>` against an up +
+  seeded stack. README section 3 says so explicitly.
+
+## 2026-09-09 - US-001
+- Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
+  (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitOverride, ES2022,
+  commonjs, declaration), `docker-compose.yml` with the `redis:7-alpine` service on 6379
+  (`--maxmemory-policy noeviction --save '' --appendonly no`) + healthcheck, and a `Makefile`
+  with up/down/logs/typecheck/test/seed/reset/verify.
+- Created placeholder workspaces `packages/cache`, `services/test-api`, `services/webhook`,
+  `services/benchmark`, each with `package.json`, `tsconfig.json`, and a stub `src/index.ts`.
+- `make verify` is a deliberate stub that exits 1 until US-008 implements it.
+- Files changed: package.json, package-lock.json, tsconfig.base.json, docker-compose.yml, Makefile,
+  packages/cache/*, services/*/{package.json,tsconfig.json,src/index.ts}.
+- Self-check executed: `make up` (redis reports healthy), `redis-cli ping` -> PONG (via docker),
+  CONFIG GET confirms noeviction / save '' / appendonly no, `make typecheck` exit 0,
+  `make test` exit 0, `make down` exit 0.
+- **Learnings for future iterations:**
+  - No host `redis-cli` — always go through the container (see Codebase Patterns).
+  - `tsc -p tsconfig.json` needs at least one input file, hence the `export {};` stubs; delete them
+    when the real modules land.
+  - Compose has no top-level `version:` key (obsolete in Compose v2).
+  - Keep the three Node service Dockerfiles OUT until their stories (US-003/004/005).
+---
+
+## 2026-09-09 - US-002
+- Implemented `packages/cache` — the shared `EntityIndex` (class) with `indexKeyFor`, `parse`,
+  `register`, `invalidateEntities`, `prune`, plus a narrow `RedisClient` / `RedisMulti` /
+  `RedisPipeline` interface listing only the commands used.
+  - `register`: one MULTI — `SADD`, `EXPIRE ttl NX`, `EXPIRE ttl GT` — every reply tuple inspected;
+    returns whether the member was newly added. TTL validated as whole seconds 1..2592000 BEFORE
+    any write (rejected call writes nothing).
+  - `invalidateEntities`: per entity `SMEMBERS` -> `UNLINK` values (batched, default 500) ->
+    `SREM` observed members (batched). Never `DEL`s the set. Deletes every member unconditionally,
+    no timestamp filter. Entities processed with bounded concurrency (default 4).
+  - `prune`: pipelined `EXISTS` per member, `SREM` the missing ones. Maintenance only, not the
+    delete path.
+  - `parse` is structural + segment regex `[A-Za-z0-9_.-]+` + category check; returns null, never
+    throws. `indexKeyFor` throws on a bad segment or unknown category.
+- Tests (`src/index.test.ts`, `node:test` + real Redis on DB 15): key building / parse-null cases;
+  NX+GT sets then extends but never shortens; rejected TTL writes nothing; full invalidate removes
+  values + refs; injected `UNLINK` failure leaves the index intact and a retry finishes; a member
+  added between SMEMBERS and SREM survives; 200,000 members invalidate without a RangeError
+  (proves batching, not spreading); prune drops dead refs only. 12/12 pass.
+- Files changed: packages/cache/{src/index.ts,src/index.test.ts,package.json,CLAUDE.md},
+  Makefile (test target now brings up redis), package-lock.json.
+- Self-check executed: `make typecheck` exit 0; `make test` -> 12 pass / 0 fail.
+- **Learnings for future iterations:**
+  - `EXPIRE key ttl 'NX'` / `'GT'` works through ioredis `multi()` untyped-passthrough; the narrow
+    `RedisMulti.expire(key, seconds, 'NX'|'GT')` signature is enough and ioredis is cast in tests.
+  - `redis.multi().exec()` resolves to `[err, reply][] | null`; `null` means EXECABORT — treat as
+    an error. A queued command that fails at runtime still shows up as `[err, ...]` in the array,
+    Redis does NOT roll the rest back.
+  - The 200k-member test takes ~2.3s against local compose Redis; keep an eye on total test time
+    as more services add real-Redis tests.
+---
+
+## 2026-09-09 - US-003
+- Implemented `services/test-api` — the innocent-bystander reader.
+  - `src/app.ts` `createApp(redis)` returns an Express app: `GET /health` -> `{ok:true}`;
+    `GET /entitlement/:userId` validates `^u_\d{7}$` (400 otherwise), builds the index key via
+    `EntityIndex.indexKeyFor("demo","activeSubscription",userId)`, then `SMEMBERS` -> `MGET`,
+    timing only the Redis round trip with `process.hrtime.bigint()`. Responds
+    `{userId, hit: values.some(Boolean), variants: values.filter(Boolean).length, latencyMs}`.
+    `hit:false`/`variants:0` for an unseeded/invalidated user is the correct answer, no fallback.
+  - `src/index.ts` opens this service's OWN ioredis connection and wires the app on `PORT` (3001),
+    with SIGTERM/SIGINT graceful shutdown.
+  - `src/config.ts` — `TENANT`/`CATEGORY` constants + `loadConfig` (PORT, REDIS_URL).
+  - Narrow `RedisReader` interface (smembers/mget only); ioredis cast at the composition root.
+- `packages/cache/package.json` gained a `prepare` script so consumers get `dist/` on `npm install`.
+- Dockerfile: multi-stage `node:22-alpine`, build context repo root, `npm ci` + build + `npm prune
+  --omit=dev`, runtime copies node_modules + both dists, `USER node`, runs compiled JS.
+- `docker-compose.yml`: `test-api` service on 3001, `depends_on: redis: service_healthy`, node-fetch
+  healthcheck. Added `.dockerignore`.
+- Files changed: services/test-api/{package.json,Dockerfile,src/{app,index,config,app.test}.ts},
+  packages/cache/{package.json,CLAUDE.md}, services/CLAUDE.md (new), docker-compose.yml,
+  .dockerignore, package.json/package-lock.json.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12/12, test-api 4/4;
+  `make up` -> test-api container reports healthy; `curl /health` -> `{"ok":true}`;
+  `curl /entitlement/u_0000001` -> 200 with `latencyMs` (and `hit:true`/`variants:1` after a
+  manual SET+SADD); `curl /entitlement/bogus` -> 400;
+  `grep -rn "KEYS\|scan(" services/test-api/src` -> no matches.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries: the cache `prepare` build, the multi-stage service
+    Dockerfile recipe, the grep-your-own-comments trap, and the live-HTTP test style.
+  - `req.params.userId` is `string | undefined` under `noUncheckedIndexedAccess` — guard it.
+  - Express 4 does not catch async handler rejections; `readEntitlement(...).then(...).catch(next-ish)`
+    or a try/catch is required or an error becomes an unhandled rejection.
+  - The runtime image has global `fetch` (node 22) but NO `curl` — compose healthchecks must use
+    `node -e`.
+---
+
+## 2026-09-09 - US-004
+- Implemented `services/webhook` — both invalidation paths behind two endpoints.
+  - `src/app.ts` `createApp(redis)`: `GET /health`; `POST /v1/invalidate` and `POST /v2/invalidate`
+    both take `{userIds:[...]}` (validated `^u_\d{7}$`, 400 otherwise), create a `Job` in an
+    in-memory `Map`, fire `void runJob(...)` and return `202 {jobId,mode,total}` at once.
+  - `runJob` walks users one at a time, checking `job.state === "stopped"` BETWEEN users. v1:
+    `redis.keys('*::<userId>::*')` then `UNLINK` the matches in batches of 500. v2: delegates each
+    user to `packages/cache` `EntityIndex.invalidateEntities(TENANT,CATEGORY,[userId])`. `removed`
+    counter = UNLINK replies (v1) / `valuesUnlinked` (v2).
+  - `GET /jobs/:id` returns the whole Job (`{jobId,mode,state,total,processed,removed,startedAt,
+    finishedAt,error?}`), 404 if unknown. `POST /jobs/:id/stop` flips a running job to `stopped`
+    (no-op otherwise) and returns `{jobId,state}`.
+  - `src/index.ts` opens webhook's OWN ioredis connection on PORT 3002 with SIGTERM/SIGINT drain.
+  - `src/config.ts` — TENANT/CATEGORY/BATCH_SIZE consts + `loadConfig` (PORT default 3002).
+- `Dockerfile` mirrors test-api's multi-stage recipe (repo-root context). `docker-compose.yml`
+  gains `webhook` on 3002, `depends_on redis: service_healthy`, node-fetch healthcheck.
+- Integration test (`src/app.test.ts`, real Redis DB 15): health; ~80 users / ~200 keys split into
+  disjoint v1 and v2 groups + one bystander — both jobs poll to `done`, every cache key for both
+  groups gone, every v2 index key gone, bystander (id + index) untouched; stop over 4000 unseeded
+  ids lands `stopped` with `processed < total`; 400s for bad bodies; 404s for unknown jobs.
+- Files changed: services/webhook/{package.json,Dockerfile,src/{app,index,config,app.test}.ts},
+  services/CLAUDE.md, docker-compose.yml, package-lock.json, prd.json, progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12/12, test-api 4/4,
+  webhook 5/5; `make up` -> webhook container healthy; `curl :3002/health` -> `{"ok":true}`;
+  `curl -XPOST :3002/v1/invalidate -d '{"userIds":["u_0000001"]}'` -> instant 202 with jobId,
+  `GET /jobs/<id>` -> `state:"done" processed:1 removed:1`, cache key gone, index key still present;
+  v2 path -> index key emptied; big v1 job -> stop -> `state:"stopped" processed:74/4000`;
+  bad body -> 400. `make down` clean.
+- **Learnings for future iterations:**
+  - See new Codebase Patterns entries (express.json, void runJob + 202, in-createApp job Map,
+    v1 leaves index sets behind).
+  - `npm install` reported "up to date" after adding webhook deps — express/ioredis/tsx were
+    already deduped from test-api — but package-lock.json still gained the webhook workspace refs.
+  - `redis.unlink()` with zero args throws; the batch loop skips empty match lists naturally.
+---
+
+## 2026-09-09 - US-005
+- Implemented `services/benchmark` — the deterministic seeder + its API and WebSocket.
+  - `src/prng.ts` — `mulberry32` (float stream) + `hashInt` (order-independent integer avalanche,
+    salted by `SEED_VALUE`). No dependency.
+  - `src/fixture.ts` — the single fixture generator: `userCount` (≈ SEED_KEYS/2), `userIdFor`
+    (`u_` + 7 digits), `variantsFor` (`1 + hash%3`), `expectedTotals`, and `generateUsers` yielding
+    `{userId, indexKey, records:[{cacheKey,value}]}`. Cache key = `test-api::demo::activeSubscription::
+    <userId>::{"v":N}`; value = `{userId,planId,status,renewsAt,seats}` (planId cycled over the four
+    plans, seats/renewsAt from the hash). Index key comes from `EntityIndex.indexKeyFor`.
+  - `src/seeder.ts` — `Seeder` (EventEmitter) state machine `idle|seeding|ready|failed`.
+    `start()` runs in the background: `flushdb`, then pipelines of ~20k commands
+    (`SET ... EX 3600`, `SADD` all members, `EXPIRE NX`, `EXPIRE GT`), inspecting **every** reply
+    tuple (error ⇒ abort ⇒ `failed`). On completion asserts `DBSIZE === cacheKeys + indexKeys`
+    BEFORE writing `seed::marker` (JSON of counts + completedAt). `init()` loads the marker so a
+    restart reports `ready` without reseeding. `reset()` = `flushdb` + back to `idle`. Emits
+    `{t:'seed-progress',done,total,percent}` on a 1s `setInterval` plus at start/finish.
+  - `src/app.ts` — `GET /health`, `GET /`, `GET /api/seed/status`, `POST /api/seed` (202, or 409
+    while seeding), `POST /api/seed/reset`.
+  - `src/ws.ts` — `attachWebSocket(server, seeder)` → hub with `broadcast`; forwards `progress`
+    events to `/ws` clients and sends a snapshot frame on connect.
+  - `src/index.ts` — own ioredis connection, `http.Server` + ws, SIGTERM/SIGINT drain.
+  - `Dockerfile` mirrors the other services; `docker-compose.yml` gains `benchmark` on 3000 with a
+    node-fetch healthcheck and `SEED_KEYS`/`SEED_VALUE` env passthrough.
+- Tests (`src/fixture.test.ts` pure, `src/seeder.test.ts` real Redis DB 15): PRNG determinism,
+  fixture byte-identity (same seed) / divergence (different seed), key/value shape, full seed +
+  DBSIZE + marker, armed TTL on both string and set (NX/GT), reseed byte-identity, `init()` from a
+  marker, `reset`, concurrent-`start` rejection, a pipeline error ⇒ `failed`, the HTTP 202/409 flow,
+  and WS `seed-progress` frames ending at percent 1. 16/16.
+- Files changed: services/benchmark/{package.json,Dockerfile,tsconfig.json,src/{config,prng,fixture,
+  seeder,app,ws,index}.ts,src/{fixture,seeder}.test.ts}, docker-compose.yml, services/CLAUDE.md,
+  package.json/package-lock.json (added `ws` + `@types/ws`), prd.json, progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` exit 0 (cache 12, test-api 4, webhook 5,
+  benchmark 16); `SEED_KEYS=50000 make up` → benchmark healthy; `POST /api/seed` → `ready` in ~1.3s
+  (< 30s), status `progress:1 users:25000 cacheKeys:49961 indexKeys:25000`; DBSIZE 74962 =
+  49961+25000+1 (marker); reseed → byte-identical value + identical DBSIZE; `seed::marker` present;
+  `POST /api/seed/reset` → DBSIZE 0, status `idle`; second `POST /api/seed` mid-seed → 409;
+  `docker compose restart benchmark` → status `ready` (no reseed); a live `/ws` client received
+  `{t:'seed-progress'}` frames.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (node:test has no timeout; closeAllConnections;
+    poll-don't-race; deterministic seeder; DBSIZE is total + 1 for the marker).
+  - A 50k seed finishes in ~1s, faster than the 1s progress ticker — you only see start/finish
+    frames at that size. The default 2M seed is where the per-second frames matter.
+  - `EXPIRE key ttl "NX"|"GT"` works through an ioredis *pipeline* (not just multi), replies inspected.
+  - US-006 run driver can `import { attachWebSocket }` / reuse `hub.broadcast` for `sample` frames,
+    and draw eviction user ids from `userIdFor(0..userCount-1)`.
+---
+
+## 2026-09-09 - US-006
+- Implemented `services/benchmark` — the run driver.
+  - `src/runner.ts` — `Runner` (EventEmitter, emits `frame`). `start(mode)` picks a `runId`, checks
+    the fixture is seeded (`FixtureNotReadyError` -> 409) and no run is active
+    (`RunInProgressError` -> 409), emits `{t:'run-started'}`, fires the first poll at t=0 and a
+    self-scheduling poll loop (`setTimeout` after each poll finishes, NOT `setInterval` — a v1 scan
+    blocks a poll for many seconds and a fixed interval would stack requests). `BATCH_DELAY_MS`
+    after start it POSTs `BATCH_USERS` ids (`userIdFor(0..count-1)`, drawn from the seeded space) to
+    `/{mode}/invalidate`, records the `jobId`, emits `{t:'batch',webhookJobId,count,elapsedSec}`.
+    Each poll: `GET test-api /entitlement/:id` timed with `hrtime.bigint()` (generous
+    `POLL_TIMEOUT_MS` 30s; a timeout emits `ok:false`, not a dropped frame), then `GET webhook
+    /jobs/:id` for counters, then `{t:'sample',latencyMs,serverLatencyMs,ok,job}`. Samples kept in
+    memory capped at `RUN_HISTORY_CAP` (3600). `stop()` clears the timers AND `POST /jobs/:id/stop`
+    on the webhook (otherwise a v1 job grinds for hours), emits `{t:'run-stopped'}`.
+    `historyFrame()` -> `{t:'history',...,samples}` for a client connecting mid-run.
+  - `src/config.ts` — `TEST_API_URL`/`WEBHOOK_URL` (container names by default) + `POLL_INTERVAL_MS`
+    / `BATCH_DELAY_MS` / `BATCH_USERS` / `POLL_TIMEOUT_MS` / `RUN_HISTORY_CAP`.
+  - `src/seeder.ts` — added `isReady()` and `get seededUserCount` for the runner's pre-flight check.
+  - `src/app.ts` — `POST /api/run` (202 `{runId,mode,webhookJobId:null}`, 400 on bad mode, 409),
+    `POST /api/run/stop` (`{stopped,runId,webhookJobId,webhookState}`). `createApp` now takes
+    `{seeder,runner}`.
+  - `src/ws.ts` — `attachWebSocket(server, seeder, runner)`; broadcasts `runner` frames and sends a
+    history frame to a mid-run client on connect.
+  - `src/index.ts` — builds the `Runner` from config; shutdown stops the run before closing.
+  - `docker-compose.yml` — benchmark gains `TEST_API_URL`/`WEBHOOK_URL` and `depends_on` test-api +
+    webhook `service_healthy`.
+- Tests (`src/runner.test.ts`, real Redis DB **14**, fake test-api + fake webhook Express apps in
+  the test so it stays self-contained): a v2 run polls, dispatches the batch, streams >=2 samples
+  whose `job` carries the completed counters, ends `run-started`/`run-stopped`, and the batch
+  users' index sets are emptied; `stop()` propagates to the webhook stop endpoint and leaves a
+  big job `stopped` with `processed < total`; HTTP `POST /api/run` 202 then 409, a mid-run `/ws`
+  client gets a `{t:'history'}` frame, `/api/run/stop` 200, bad mode 400. 3/3.
+- Files changed: services/benchmark/src/{runner,runner.test,config,seeder,app,ws,index}.ts,
+  services/benchmark/src/seeder.test.ts, docker-compose.yml, services/CLAUDE.md, prd.json,
+  progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12, test-api 4, webhook 5,
+  benchmark 19 (all pass); `SEED_KEYS=50000 make up` -> all healthy; seed -> ready
+  (49961 cache + 25000 index); `POST /api/run {mode:v2}` -> run starts, ~1 sample/sec over a live
+  `/ws` (batch dispatched at elapsedSec 1, samples carry `job:{processed:1000,total:1000,state:done}`,
+  a mid-run client got a `history` frame); second `POST /api/run` -> 409; `POST /api/run/stop` ->
+  webhook job `done`; a v1 run -> stop -> webhook job `stopped` at processed 91/1000. `make down` clean.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (parallel test files need separate Redis DBs; race
+    done/failed in a `before` hook; the runner wiring; express.json 100kb limit).
+  - The self-check line in US-006.md expects the webhook job to be `stopped` after a v2 run/stop,
+    but a 50k-key v2 batch of 1000 users FINISHES in ~1s, so it lands `done`. That's correct — the
+    run driver still calls the stop endpoint; the state it reports back is whatever the job reached.
+  - US-007 (UI): read frames off `/ws` — `run-started`, `batch` (shade the band from here),
+    `sample` (x = `elapsedSec`, y = `latencyMs` LOG scale), `run-stopped`, `history` on reconnect,
+    `seed-progress`. The run buttons should be disabled unless `seed-progress`/status shows ready.
+---
+
+## 2026-09-09 - US-007
+- Implemented `services/benchmark` — the live single-page UI.
+  - `src/ui.ts` — exports `UI_HTML`, one self-contained page (no build step, no CDN, no framework):
+    inline CSS (dark theme), a `<canvas>` chart drawn in plain ES5-ish JS, and an IIFE that owns an
+    auto-reconnecting WebSocket (exponential backoff capped at 10s) plus a 2s `GET /api/seed/status`
+    poll for the status strip.
+  - Chart: x = `elapsedSec`, y = `latencyMs` on a **log scale** (grid line + label per power of ten;
+    y domain snapped to the next power of ten above the max sample). Connected line per run, filled
+    dots for `ok` samples, a hollow red cross for `ok:false` timeouts, and a dashed amber vertical
+    marker labelled "eviction batch dispatched" at `batchSec`.
+  - Frames handled off `/ws`: `seed-progress` (progress bar + triggers a status refresh at 100%),
+    `run-started` (reset chart), `history` (redraw on reconnect / refresh — rebuilds run + batch
+    marker + last job counters), `sample` (append, update job), `batch` (set marker), `run-stopped`
+    (freeze, re-enable run buttons).
+  - Controls: "Measure legacy (KEYS) eviction" / "Measure hashed index eviction" / "Stop", plus a
+    "Seed fixture" button shown only when seed state != ready. Run buttons disabled unless
+    `state === "ready"` and no run active; Stop enabled only while a run is active.
+  - Status strip: seed state + key count + memory, run mode, elapsed (ticks every 1s), webhook job
+    `processed / total (state)`, connection state (coloured).
+  - `src/app.ts` — `GET /` now `res.type("html").send(UI_HTML)` (was a text/plain stub).
+- Tests (`src/ui.test.ts`, pure — no Redis): page is self-contained (no `<script src>`, no external
+  css/js URL); canvas + `Math.log`/`Math.LN10` + dispatch marker + "logarithmic" present; the three
+  controls + seed fallback present; WebSocket auto-reconnect + `"history"` handling present;
+  `GET /` serves it as `text/html` and the body equals `UI_HTML`. 5/5 (benchmark suite now 24).
+- Files changed: services/benchmark/src/{ui.ts,ui.test.ts,app.ts}, services/CLAUDE.md, prd.json,
+  progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` exit 0 (cache 12, test-api 4, webhook 5,
+  benchmark 24). `SEED_KEYS=50000 make up` -> all healthy; `curl :3000/` -> the HTML page;
+  `POST /api/seed` -> ready (49961 cache + 25000 index). Drove a **v2** run over a live `/ws`:
+  `run-started` -> ~1 sample/sec (flat 3-40 ms) -> `batch` at elapsedSec 1 (jobId recorded,
+  count 1000) -> samples carry `job:1000/1000 done` -> `POST /api/run/stop` -> `run-stopped`
+  webhookState `done`. Drove a **v1** run: reconnected mid-run, got a `{t:'history'}` frame with 6
+  samples + batchAt, job `processed` crawling 122->195/1000, stop -> webhookState `stopped`.
+  `make down` clean.
+- Browser rendering (canvas paint) NOT verified — no browser/MCP tooling in this environment. The
+  HTML/JS is dependency-free vanilla; all server-side plumbing (routing, frames, history, reconnect
+  path) is verified above and by `ui.test.ts`. Manual browser check of the chart still recommended
+  for US-008.
+- **Learnings for future iterations:**
+  - See new Codebase Patterns entries (UI is a served string not a static file; v1 shows no latency
+    step at 50k keys — that is expected, the spike needs the 2M+ fixture).
+  - `GET /` handler touches neither seeder nor runner, so `ui.test.ts` passes bare `{}` stubs to
+    `createApp` and needs no Redis / its own DB number.
+  - Node 22 has a global `WebSocket` client — handy for driving `/ws` from a one-off `node -e`
+    self-check without pulling in the `ws` package.
+---
+
+## 2026-09-09 - US-008
+- Implemented `make verify` and rewrote the README; committed captured run output under `docs/`.
+  - `scripts/verify.mjs` — pure Node builtins (`node:child_process`, global `fetch`/`WebSocket`).
+    Steps: `docker compose up -d --build` → wait every healthcheck → `POST /api/seed`
+    (SEED_KEYS=50000) → poll `/api/seed/status` to `ready` → capture DBSIZE + a census of the
+    batch users' keys (`redis-cli EXISTS` for the 1000 index keys, `redis-cli --scan --pattern`
+    for their cache keys) → `POST /api/run {mode:'v2'}` → watch `/ws` for the `batch` frame's
+    `webhookJobId` → poll `GET :3002/jobs/:id` to `done` → `POST /api/run/stop` → assert every
+    batch cache+index key gone, a control user (`u_<users-1>`) still has its cache via
+    `GET :3001/entitlement/:id`, and `DBSIZE` dropped by exactly the pre-run census → always
+    `docker compose down -v`. Exits non-zero on any failure (`die()` → `down()` → exit 1).
+  - `scripts/capture-run.mjs` — `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>`:
+    connects `/ws`, `POST /api/run`, records frames for N seconds, `POST /api/run/stop`, writes a
+    JSON summary. Produces `docs/run-index.json` / `docs/run-legacy.json`.
+  - `Makefile` `verify` target: `SEED_KEYS=$${SEED_KEYS:-50000} node scripts/verify.mjs` (was a
+    stub that exited 1). No `node_modules` prereq.
+  - `README.md` — rewritten around a visitor's path: what it shows, quick start, what each run
+    looks like (+ the committed samples and the caveat that 50k hides the latency spike), costs
+    table, why v1 doesn't finish (+ the baseline numbers), plain caveats, doc links (incl. the two
+    run JSONs), `make verify` / `make typecheck` / `make test`, and the Ralph build loop.
+- Files changed: scripts/{verify,capture-run}.mjs (new), Makefile, README.md,
+  docs/run-{index,legacy}.json (new), prd.json, progress.txt.
+- Self-check executed: `git clean -xdf` (removed node_modules + dist) then `make verify` →
+  full build, seed ready (49961 cache + 25000 index), v2 job `done processed:1000 removed:2011`,
+  DBSIZE 74962 → 71951 (dropped 3011 = 2011 cache + 1000 index, exactly), `down -v`, `VERIFY OK`,
+  exit 0. Then `npm install && make typecheck` (exit 0) and `make test` (cache 12, test-api 4,
+  webhook 5, benchmark 24 — all pass, exit 0). Run samples captured at SEED_KEYS=50000: v2 flat
+  3–44 ms, v1 `processed` crawls 23 → 547 over 25 s with latency still sub-100 ms (expected at
+  this fixture size — see Codebase Patterns).
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (verify.mjs shape / always-down / exact DBSIZE-drop
+    assertion; the captured-frames artifacts).
+  - Browser rendering of the chart is still NOT machine-verified in this environment. The UI JS is
+    dependency-free vanilla and every server-side path is covered; a human should still eyeball the
+    canvas once. The README is explicit that the committed run output is frames, not screenshots.
+  - This was the last story — all eight `passes: true`.
+---
