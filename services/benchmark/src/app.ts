@@ -6,14 +6,16 @@
 
 import express, { type Express, type Request, type Response } from "express";
 
+import { FixtureNotReadyError, RunInProgressError, type Runner } from "./runner";
 import { AlreadySeedingError, type Seeder } from "./seeder";
 
 export interface BenchmarkDeps {
   seeder: Seeder;
+  runner: Runner;
 }
 
 export function createApp(deps: BenchmarkDeps): Express {
-  const { seeder } = deps;
+  const { seeder, runner } = deps;
 
   const app = express();
   app.disable("x-powered-by");
@@ -52,6 +54,32 @@ export function createApp(deps: BenchmarkDeps): Express {
       throw err;
     }
     res.status(202).json({ state: "seeding" });
+  });
+
+  app.post("/api/run", (req: Request, res: Response) => {
+    const mode = (req.body as { mode?: unknown } | undefined)?.mode;
+    if (mode !== "v1" && mode !== "v2") {
+      res.status(400).json({ error: "body must be { mode: 'v1' | 'v2' }" });
+      return;
+    }
+    try {
+      res.status(202).json(runner.start(mode));
+    } catch (err) {
+      if (err instanceof RunInProgressError || err instanceof FixtureNotReadyError) {
+        res.status(409).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  app.post("/api/run/stop", (_req: Request, res: Response) => {
+    void runner
+      .stop()
+      .then((result) => res.json(result))
+      .catch((err: unknown) => {
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      });
   });
 
   app.post("/api/seed/reset", (_req: Request, res: Response) => {

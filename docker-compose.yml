@@ -19,8 +19,14 @@ services:
       REDIS_URL: redis://redis:6379
       SEED_KEYS: "${SEED_KEYS:-2000000}"
       SEED_VALUE: "${SEED_VALUE:-1}"
+      TEST_API_URL: http://test-api:3001
+      WEBHOOK_URL: http://webhook:3002
     depends_on:
       redis:
+        condition: service_healthy
+      test-api:
+        condition: service_healthy
+      webhook:
         condition: service_healthy
     healthcheck:
       test:

@@ -65,6 +65,20 @@ something general and reusable — not story-specific details.
 - `SEED_KEYS` counts cache *records*; users ≈ SEED_KEYS/2 (`averageVariants` = 2). Actual cacheKeys
   is the sum of `1+(hash(i)%3)` and lands a hair under SEED_KEYS — status/marker report the real count.
 - Compose forwards `SEED_KEYS`/`SEED_VALUE` from the shell env, so `SEED_KEYS=50000 make up` works.
+- Node's test runner runs each `*.test.ts` file in a PARALLEL child process. Two files that both hit
+  real Redis and `flushdb` will clobber each other — give each redis-touching test file its own DB
+  number (seeder.test.ts = 15, runner.test.ts = 14). Watch this as more services add such tests.
+- A test `before`/`beforeEach` that does `await once(emitter, "done")` HANGS the whole file forever
+  if the operation emits `failed` instead (node:test has no timeout). Race both:
+  `new Promise((res,rej) => { e.once("done",res); e.once("failed",m=>rej(new Error(m))); })`.
+- benchmark `createApp` now takes `{ seeder, runner }` and `attachWebSocket(server, seeder, runner)`
+  takes the runner too. The `Runner` (EventEmitter, emits `frame`) is the US-006 run driver; the ws
+  hub broadcasts its frames and sends `runner.historyFrame()` to a client connecting mid-run.
+- The run driver reaches test-api / webhook over HTTP by container name (`TEST_API_URL` /
+  `WEBHOOK_URL`, default `http://test-api:3001` / `http://webhook:3002`). It does NOT share their
+  Redis connection — it only speaks their public API.
+- express.json() default body limit is 100kb (~9000 `u_ddddddd` ids). BATCH_USERS default 1000 is
+  well under; if a future story raises it past ~8000 the webhook needs `express.json({limit})`.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -237,4 +251,56 @@ something general and reusable — not story-specific details.
   - `EXPIRE key ttl "NX"|"GT"` works through an ioredis *pipeline* (not just multi), replies inspected.
   - US-006 run driver can `import { attachWebSocket }` / reuse `hub.broadcast` for `sample` frames,
     and draw eviction user ids from `userIdFor(0..userCount-1)`.
+---
+
+## 2026-09-09 - US-006
+- Implemented `services/benchmark` — the run driver.
+  - `src/runner.ts` — `Runner` (EventEmitter, emits `frame`). `start(mode)` picks a `runId`, checks
+    the fixture is seeded (`FixtureNotReadyError` -> 409) and no run is active
+    (`RunInProgressError` -> 409), emits `{t:'run-started'}`, fires the first poll at t=0 and a
+    self-scheduling poll loop (`setTimeout` after each poll finishes, NOT `setInterval` — a v1 scan
+    blocks a poll for many seconds and a fixed interval would stack requests). `BATCH_DELAY_MS`
+    after start it POSTs `BATCH_USERS` ids (`userIdFor(0..count-1)`, drawn from the seeded space) to
+    `/{mode}/invalidate`, records the `jobId`, emits `{t:'batch',webhookJobId,count,elapsedSec}`.
+    Each poll: `GET test-api /entitlement/:id` timed with `hrtime.bigint()` (generous
+    `POLL_TIMEOUT_MS` 30s; a timeout emits `ok:false`, not a dropped frame), then `GET webhook
+    /jobs/:id` for counters, then `{t:'sample',latencyMs,serverLatencyMs,ok,job}`. Samples kept in
+    memory capped at `RUN_HISTORY_CAP` (3600). `stop()` clears the timers AND `POST /jobs/:id/stop`
+    on the webhook (otherwise a v1 job grinds for hours), emits `{t:'run-stopped'}`.
+    `historyFrame()` -> `{t:'history',...,samples}` for a client connecting mid-run.
+  - `src/config.ts` — `TEST_API_URL`/`WEBHOOK_URL` (container names by default) + `POLL_INTERVAL_MS`
+    / `BATCH_DELAY_MS` / `BATCH_USERS` / `POLL_TIMEOUT_MS` / `RUN_HISTORY_CAP`.
+  - `src/seeder.ts` — added `isReady()` and `get seededUserCount` for the runner's pre-flight check.
+  - `src/app.ts` — `POST /api/run` (202 `{runId,mode,webhookJobId:null}`, 400 on bad mode, 409),
+    `POST /api/run/stop` (`{stopped,runId,webhookJobId,webhookState}`). `createApp` now takes
+    `{seeder,runner}`.
+  - `src/ws.ts` — `attachWebSocket(server, seeder, runner)`; broadcasts `runner` frames and sends a
+    history frame to a mid-run client on connect.
+  - `src/index.ts` — builds the `Runner` from config; shutdown stops the run before closing.
+  - `docker-compose.yml` — benchmark gains `TEST_API_URL`/`WEBHOOK_URL` and `depends_on` test-api +
+    webhook `service_healthy`.
+- Tests (`src/runner.test.ts`, real Redis DB **14**, fake test-api + fake webhook Express apps in
+  the test so it stays self-contained): a v2 run polls, dispatches the batch, streams >=2 samples
+  whose `job` carries the completed counters, ends `run-started`/`run-stopped`, and the batch
+  users' index sets are emptied; `stop()` propagates to the webhook stop endpoint and leaves a
+  big job `stopped` with `processed < total`; HTTP `POST /api/run` 202 then 409, a mid-run `/ws`
+  client gets a `{t:'history'}` frame, `/api/run/stop` 200, bad mode 400. 3/3.
+- Files changed: services/benchmark/src/{runner,runner.test,config,seeder,app,ws,index}.ts,
+  services/benchmark/src/seeder.test.ts, docker-compose.yml, services/CLAUDE.md, prd.json,
+  progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12, test-api 4, webhook 5,
+  benchmark 19 (all pass); `SEED_KEYS=50000 make up` -> all healthy; seed -> ready
+  (49961 cache + 25000 index); `POST /api/run {mode:v2}` -> run starts, ~1 sample/sec over a live
+  `/ws` (batch dispatched at elapsedSec 1, samples carry `job:{processed:1000,total:1000,state:done}`,
+  a mid-run client got a `history` frame); second `POST /api/run` -> 409; `POST /api/run/stop` ->
+  webhook job `done`; a v1 run -> stop -> webhook job `stopped` at processed 91/1000. `make down` clean.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries (parallel test files need separate Redis DBs; race
+    done/failed in a `before` hook; the runner wiring; express.json 100kb limit).
+  - The self-check line in US-006.md expects the webhook job to be `stopped` after a v2 run/stop,
+    but a 50k-key v2 batch of 1000 users FINISHES in ~1s, so it lands `done`. That's correct — the
+    run driver still calls the stop endpoint; the state it reports back is whatever the job reached.
+  - US-007 (UI): read frames off `/ws` — `run-started`, `batch` (shade the band from here),
+    `sample` (x = `elapsedSec`, y = `latencyMs` LOG scale), `run-stopped`, `history` on reconnect,
+    `seed-progress`. The run buttons should be disabled unless `seed-progress`/status shows ready.
 ---

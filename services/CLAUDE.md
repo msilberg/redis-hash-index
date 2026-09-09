@@ -32,8 +32,18 @@ never `await` it in the handler.
 ## benchmark
 
 - It is not just an Express app: `src/index.ts` builds an `http.Server` so `ws` can attach at
-  `/ws`. `createApp({ seeder })` returns the app; `attachWebSocket(server, seeder)` returns a hub
-  whose `broadcast` the run driver (US-006) reuses. Tests drive both via `createServer(app)`.
+  `/ws`. `createApp({ seeder, runner })` returns the app; `attachWebSocket(server, seeder, runner)`
+  returns a hub whose `broadcast` fans out both the seeder's `progress` events and the runner's
+  `frame` events. Tests drive both via `createServer(app)`.
+- The `Runner` (`src/runner.ts`, US-006) is the run driver: it polls test-api and fires an
+  eviction batch at the webhook over **HTTP by container name** (`TEST_API_URL` / `WEBHOOK_URL`),
+  never sharing their Redis client. It self-schedules polls (`setTimeout` after each finishes), not
+  `setInterval` — a v1 scan blocks a poll for many seconds and a fixed interval would stack them.
+  `stop()` must also `POST /jobs/:id/stop` on the webhook or a v1 job grinds on for hours.
+- Test files run in parallel child processes: `seeder.test.ts` owns Redis DB 15, `runner.test.ts`
+  owns DB 14. A new redis-touching test file needs its own DB number.
+- A `before`/`beforeEach` hook that `await once(seeder, "done")` hangs forever if the seed emits
+  `failed` — race the two events and reject on `failed`.
 - The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,
   cache keys and values; `hashInt` is order-independent so `variantsFor(i)` never depends on
   iteration. Change the generator and every existing fixture / marker silently diverges.

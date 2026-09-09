@@ -112,6 +112,16 @@ export class Seeder extends EventEmitter {
     return this.state === "seeding";
   }
 
+  /** True once a completed fixture is in Redis (fresh seed or a marker loaded at boot). */
+  isReady(): boolean {
+    return this.state === "ready";
+  }
+
+  /** Distinct users in the current/last fixture; 0 until a seed completes. Used by the run driver. */
+  get seededUserCount(): number {
+    return this.expected.users;
+  }
+
   /** Begin seeding in the background. Throws {@link AlreadySeedingError} if one is already running. */
   start(): void {
     if (this.state === "seeding") throw new AlreadySeedingError();

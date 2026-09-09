@@ -10,6 +10,7 @@ import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
 
 import { createApp } from "./app";
 import { MARKER_KEY } from "./config";
+import { Runner } from "./runner";
 import { expectedTotals } from "./fixture";
 import {
   AlreadySeedingError,
@@ -36,6 +37,18 @@ async function closeServer(server: Server): Promise<void> {
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 }
+
+/** An inert run driver — these tests never start a run; they just need `createApp` to have one. */
+const idleRunner = (s: Seeder): Runner =>
+  new Runner(s, {
+    testApiBaseUrl: "http://127.0.0.1:1",
+    webhookBaseUrl: "http://127.0.0.1:1",
+    pollIntervalMs: 1000,
+    batchDelayMs: 1000,
+    batchUsers: 1000,
+    pollTimeoutMs: 30_000,
+    historyCap: 3600,
+  });
 
 const newSeeder = (seedKeys = SEED_KEYS, seedValue = SEED_VALUE): Seeder =>
   new Seeder(redis as unknown as SeederRedis, index, {
@@ -190,11 +203,12 @@ test("HTTP: POST /api/seed is 202, a second is 409, status then reports ready", 
   // A larger fixture so the second POST reliably lands while the first seed is still running.
   const seeder = newSeeder(40_000);
   await seeder.init();
-  const app = createApp({ seeder });
+  const runner = idleRunner(seeder);
+  const app = createApp({ seeder, runner });
   const server: Server = await new Promise((resolve) => {
     const s = createServer(app).listen(0, () => resolve(s));
   });
-  const hub = attachWebSocket(server, seeder);
+  const hub = attachWebSocket(server, seeder, runner);
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
 
@@ -226,11 +240,12 @@ test("HTTP: POST /api/seed is 202, a second is 409, status then reports ready", 
 
 test("WebSocket receives seed-progress frames ending at percent 1", async () => {
   const seeder = newSeeder();
-  const app = createApp({ seeder });
+  const runner = idleRunner(seeder);
+  const app = createApp({ seeder, runner });
   const server: Server = await new Promise((resolve) => {
     const s = createServer(app).listen(0, () => resolve(s));
   });
-  const hub = attachWebSocket(server, seeder);
+  const hub = attachWebSocket(server, seeder, runner);
   const { port } = server.address() as AddressInfo;
 
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);

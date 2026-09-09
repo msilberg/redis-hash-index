@@ -5,6 +5,7 @@ import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
 
 import { createApp } from "./app";
 import { CATEGORY, loadConfig } from "./config";
+import { Runner } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
 import { attachWebSocket } from "./ws";
 
@@ -25,9 +26,19 @@ async function main(): Promise<void> {
   });
   await seeder.init();
 
-  const app = createApp({ seeder });
+  const runner = new Runner(seeder, {
+    testApiBaseUrl: config.testApiBaseUrl,
+    webhookBaseUrl: config.webhookBaseUrl,
+    pollIntervalMs: config.pollIntervalMs,
+    batchDelayMs: config.batchDelayMs,
+    batchUsers: config.batchUsers,
+    pollTimeoutMs: config.pollTimeoutMs,
+    historyCap: config.runHistoryCap,
+  });
+
+  const app = createApp({ seeder, runner });
   const server = createServer(app);
-  const hub = attachWebSocket(server, seeder);
+  const hub = attachWebSocket(server, seeder, runner);
 
   server.listen(config.port, () => {
     console.log(`[benchmark] listening on :${config.port} (seedKeys=${config.seedKeys})`);
@@ -35,7 +46,7 @@ async function main(): Promise<void> {
 
   const shutdown = (signal: string): void => {
     console.log(`[benchmark] ${signal} received, shutting down`);
-    void hub.close().finally(() => {
+    void runner.stop().finally(() => hub.close()).finally(() => {
       server.close(() => {
         void redis.quit().finally(() => process.exit(0));
       });
