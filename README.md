@@ -42,13 +42,16 @@ shows because the victim and the perpetrator are genuinely separate processes.
 
 ## 2. Quick start
 
-Requires Docker and `make`. (`node` on the host is used only by `make verify`.)
+Requires Docker and `make`. (`node` on the host is used only by `make up`'s seed step and `make verify`.)
 
 ```bash
-make up                 # redis + the three services, built and healthy
-make seed               # populate the fixture (default 2M records, ~1 min, ~700 MB)
+make up                 # build, wait for health, seed the fixture (default 2M records, ~1 min, ~700 MB)
 open http://localhost:3000
 ```
+
+`make up` seeds automatically and streams live progress; it skips seeding if the fixture is already
+there. Re-seed a running stack with `make seed` (or `make seed FORCE=1` to overwrite an existing
+fixture).
 
 Then press one of the two buttons and watch the chart. Press **Stop** when you have seen enough.
 
@@ -86,7 +89,7 @@ Roughly **350 MB per million cache records** including indexes:
 | 10,000,000 | ~3.3 GB | several minutes | the full run |
 
 ```bash
-SEED_KEYS=10000000 make up && make seed
+SEED_KEYS=10000000 make up
 ```
 
 The fixture is deterministic from `SEED_VALUE` (default `1`): the same seed produces byte-identical

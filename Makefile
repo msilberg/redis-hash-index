@@ -1,11 +1,14 @@
 .PHONY: up down logs typecheck test seed reset verify
 
-# Bring up the stack and wait for every container to report healthy.
+# Bring up the stack, wait for every container to report healthy, then seed the fixture.
+# Seeding is a no-op if the fixture is already present — `make reset` first, or `make seed FORCE=1`,
+# to reseed. `SEED_KEYS=… make up` still controls the fixture size.
 up: node_modules
 	docker compose up -d --build
 	@echo "waiting for containers to become healthy..."
 	@timeout 90 sh -c 'until [ -z "$$(docker compose ps -q)" ] || ! docker compose ps -q | xargs -r docker inspect --format "{{.Name}} {{if .State.Health}}{{.State.Health.Status}}{{else}}no-healthcheck{{end}}" | grep -vE "(healthy|no-healthcheck)$$"; do sleep 2; done'
 	@docker compose ps
+	@$(MAKE) --no-print-directory seed
 
 down:
 	docker compose down -v
@@ -21,8 +24,9 @@ test: node_modules
 	@timeout 30 sh -c 'until docker compose exec -T redis redis-cli ping 2>/dev/null | grep -q PONG; do sleep 1; done'
 	npm run test --workspaces --if-present
 
+# Seed the deterministic fixture and stream live progress. Needs the stack up (`make up` runs it).
 seed:
-	curl -fsS -XPOST localhost:3000/api/seed || true
+	@node scripts/seed.mjs
 
 reset:
 	curl -fsS -XPOST localhost:3000/api/seed/reset || true

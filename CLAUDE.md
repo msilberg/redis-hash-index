@@ -128,11 +128,11 @@ place in a demo about one Redis command.
 ## Commands
 
 ```bash
-make up          # docker compose up -d --build, wait for health
+make up          # build, wait for health, then seed the fixture (live progress)
 make down        # down -v
 make typecheck   # tsc --noEmit across workspaces
 make test        # tests
-make seed        # POST /api/seed
+make seed        # (re)seed the fixture; run by `make up`, FORCE=1 to reseed
 make verify      # full end-to-end check (US-008)
 ```
 
