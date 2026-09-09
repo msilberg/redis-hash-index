@@ -41,7 +41,11 @@ never `await` it in the handler.
   `setInterval` — a v1 scan blocks a poll for many seconds and a fixed interval would stack them.
   `stop()` must also `POST /jobs/:id/stop` on the webhook or a v1 job grinds on for hours.
 - Test files run in parallel child processes: `seeder.test.ts` owns Redis DB 15, `runner.test.ts`
-  owns DB 14. A new redis-touching test file needs its own DB number.
+  owns DB 14. A new redis-touching test file needs its own DB number. (`ui.test.ts` is pure — no DB.)
+- The UI (US-007) is `src/ui.ts` exporting `UI_HTML` as a string, not a static file: the Dockerfile
+  copies only `dist/`, so a served string needs no extra copy step. It is one self-contained page —
+  keep it CDN-free and framework-free (canvas chart in plain JS). The client reads `/ws` frames and
+  polls `GET /api/seed/status` for seed `state` (the `seed-progress` frame carries only done/total).
 - A `before`/`beforeEach` hook that `await once(seeder, "done")` hangs forever if the seed emits
   `failed` — race the two events and reject on `failed`.
 - The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,

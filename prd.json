@@ -128,7 +128,7 @@
         "Verified in a browser: both runs start, the chart moves, Stop halts it"
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-007.md"
     },
     {

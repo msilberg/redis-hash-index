@@ -8,6 +8,7 @@ import express, { type Express, type Request, type Response } from "express";
 
 import { FixtureNotReadyError, RunInProgressError, type Runner } from "./runner";
 import { AlreadySeedingError, type Seeder } from "./seeder";
+import { UI_HTML } from "./ui";
 
 export interface BenchmarkDeps {
   seeder: Seeder;
@@ -25,9 +26,10 @@ export function createApp(deps: BenchmarkDeps): Express {
     res.json({ ok: true });
   });
 
-  // The single-page UI lands in US-007; until then this keeps `GET /` from 404-ing.
+  // The live UI (US-007) — one self-contained page, served as a string so the Dockerfile needs no
+  // extra copy step. See src/ui.ts.
   app.get("/", (_req: Request, res: Response) => {
-    res.type("text/plain").send("benchmark UI — see US-007. API: /api/seed, /api/seed/status\n");
+    res.type("html").send(UI_HTML);
   });
 
   app.get("/api/seed/status", (_req: Request, res: Response) => {
