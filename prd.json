@@ -71,7 +71,7 @@
         "`make typecheck` and `make test` exit 0"
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-004.md"
     },
     {

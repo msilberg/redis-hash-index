@@ -44,6 +44,12 @@ something general and reusable — not story-specific details.
   no tsx in prod. Compose healthcheck uses `node -e "fetch(...health...)"` — the image has no curl.
 - Self-checks that `grep` the service source for `KEYS`/`scan(` will match your OWN comments too.
   Don't write those literal tokens in `services/*/src` — say "enumerate the keyspace" instead.
+  EXCEPTION: `services/webhook` v1 path legitimately calls `redis.keys('*::<userId>::*')`.
+- Services that accept a JSON body need `app.use(express.json())`. Long work: `void runJob(...)`
+  then `res.status(202)` immediately; the worker owns all its own error handling and sets
+  `job.state`. Job store is an in-memory `Map` created INSIDE `createApp` so tests are isolated.
+- The v1 KEYS pattern keeps both `::` so it never matches the index key (name ends at the id).
+  v1 therefore leaves index sets behind (they TTL out); only v2 empties them via `SREM`.
 - Service tests: live HTTP via `createApp(redis)` on `app.listen(0)` + global `fetch`; modules are
   `commonjs` so use `__dirname`, never `import.meta.url`.
 
@@ -134,4 +140,40 @@ something general and reusable — not story-specific details.
     or a try/catch is required or an error becomes an unhandled rejection.
   - The runtime image has global `fetch` (node 22) but NO `curl` — compose healthchecks must use
     `node -e`.
+---
+
+## 2026-09-09 - US-004
+- Implemented `services/webhook` — both invalidation paths behind two endpoints.
+  - `src/app.ts` `createApp(redis)`: `GET /health`; `POST /v1/invalidate` and `POST /v2/invalidate`
+    both take `{userIds:[...]}` (validated `^u_\d{7}$`, 400 otherwise), create a `Job` in an
+    in-memory `Map`, fire `void runJob(...)` and return `202 {jobId,mode,total}` at once.
+  - `runJob` walks users one at a time, checking `job.state === "stopped"` BETWEEN users. v1:
+    `redis.keys('*::<userId>::*')` then `UNLINK` the matches in batches of 500. v2: delegates each
+    user to `packages/cache` `EntityIndex.invalidateEntities(TENANT,CATEGORY,[userId])`. `removed`
+    counter = UNLINK replies (v1) / `valuesUnlinked` (v2).
+  - `GET /jobs/:id` returns the whole Job (`{jobId,mode,state,total,processed,removed,startedAt,
+    finishedAt,error?}`), 404 if unknown. `POST /jobs/:id/stop` flips a running job to `stopped`
+    (no-op otherwise) and returns `{jobId,state}`.
+  - `src/index.ts` opens webhook's OWN ioredis connection on PORT 3002 with SIGTERM/SIGINT drain.
+  - `src/config.ts` — TENANT/CATEGORY/BATCH_SIZE consts + `loadConfig` (PORT default 3002).
+- `Dockerfile` mirrors test-api's multi-stage recipe (repo-root context). `docker-compose.yml`
+  gains `webhook` on 3002, `depends_on redis: service_healthy`, node-fetch healthcheck.
+- Integration test (`src/app.test.ts`, real Redis DB 15): health; ~80 users / ~200 keys split into
+  disjoint v1 and v2 groups + one bystander — both jobs poll to `done`, every cache key for both
+  groups gone, every v2 index key gone, bystander (id + index) untouched; stop over 4000 unseeded
+  ids lands `stopped` with `processed < total`; 400s for bad bodies; 404s for unknown jobs.
+- Files changed: services/webhook/{package.json,Dockerfile,src/{app,index,config,app.test}.ts},
+  services/CLAUDE.md, docker-compose.yml, package-lock.json, prd.json, progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12/12, test-api 4/4,
+  webhook 5/5; `make up` -> webhook container healthy; `curl :3002/health` -> `{"ok":true}`;
+  `curl -XPOST :3002/v1/invalidate -d '{"userIds":["u_0000001"]}'` -> instant 202 with jobId,
+  `GET /jobs/<id>` -> `state:"done" processed:1 removed:1`, cache key gone, index key still present;
+  v2 path -> index key emptied; big v1 job -> stop -> `state:"stopped" processed:74/4000`;
+  bad body -> 400. `make down` clean.
+- **Learnings for future iterations:**
+  - See new Codebase Patterns entries (express.json, void runJob + 202, in-createApp job Map,
+    v1 leaves index sets behind).
+  - `npm install` reported "up to date" after adding webhook deps — express/ioredis/tsx were
+    already deduped from test-api — but package-lock.json still gained the webhook workspace refs.
+  - `redis.unlink()` with zero args throws; the batch loop skips empty match lists naturally.
 ---
