@@ -1,0 +1,8 @@
+{
+  "name": "@redis-hash-index/test-api",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  }
+}

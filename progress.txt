@@ -18,3 +18,33 @@ something general and reusable — not story-specific details.
 - Redis runs with `--maxmemory-policy noeviction`. If it evicts the fixture, the benchmark lies.
 - Every Redis pipeline reply must be inspected. A silently dropped `SET` shrinks the keyspace and
   flatters the wrong side of the comparison.
+- This dev machine has NO local `redis-cli`. Use `docker compose exec -T redis redis-cli ...`
+  (or `docker run --rm --network host redis:7-alpine redis-cli -h localhost ...`) in scripts and
+  self-checks instead of assuming a host binary.
+- npm workspaces: root `package.json` has `workspaces: [packages/cache, services/*]`, each workspace
+  has its own `tsconfig.json` extending `tsconfig.base.json` and a `typecheck` script. `make typecheck`
+  / `make test` fan out with `npm run <x> --workspaces --if-present`.
+- `make up` waits for health via `docker inspect --format '{{.State.Health.Status}}'` on
+  `docker compose ps -q` — no `jq` dependency.
+
+## 2026-09-09 - US-001
+- Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
+  (strict, noUncheckedIndexedAccess, exactOptionalPropertyTypes, noImplicitOverride, ES2022,
+  commonjs, declaration), `docker-compose.yml` with the `redis:7-alpine` service on 6379
+  (`--maxmemory-policy noeviction --save '' --appendonly no`) + healthcheck, and a `Makefile`
+  with up/down/logs/typecheck/test/seed/reset/verify.
+- Created placeholder workspaces `packages/cache`, `services/test-api`, `services/webhook`,
+  `services/benchmark`, each with `package.json`, `tsconfig.json`, and a stub `src/index.ts`.
+- `make verify` is a deliberate stub that exits 1 until US-008 implements it.
+- Files changed: package.json, package-lock.json, tsconfig.base.json, docker-compose.yml, Makefile,
+  packages/cache/*, services/*/{package.json,tsconfig.json,src/index.ts}.
+- Self-check executed: `make up` (redis reports healthy), `redis-cli ping` -> PONG (via docker),
+  CONFIG GET confirms noeviction / save '' / appendonly no, `make typecheck` exit 0,
+  `make test` exit 0, `make down` exit 0.
+- **Learnings for future iterations:**
+  - No host `redis-cli` — always go through the container (see Codebase Patterns).
+  - `tsc -p tsconfig.json` needs at least one input file, hence the `export {};` stubs; delete them
+    when the real modules land.
+  - Compose has no top-level `version:` key (obsolete in Compose v2).
+  - Keep the three Node service Dockerfiles OUT until their stories (US-003/004/005).
+---

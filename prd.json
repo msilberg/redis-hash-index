@@ -17,7 +17,7 @@
         "README section 'Quick start' documents make up / make seed / open localhost:3000"
       ],
       "priority": 1,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-001.md"
     },
     {

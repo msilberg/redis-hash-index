@@ -1,0 +1,19 @@
+{
+  "name": "redis-hash-index",
+  "private": true,
+  "version": "0.0.0",
+  "license": "GPL-3.0",
+  "workspaces": [
+    "packages/cache",
+    "services/test-api",
+    "services/webhook",
+    "services/benchmark"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}
