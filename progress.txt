@@ -34,6 +34,18 @@ something general and reusable — not story-specific details.
   (`redis as unknown as RedisClient`) — the narrow interface is intentional, don't widen it.
 - `EntityIndex.parse` returns `null` for a foreign/malformed key (never throws); `indexKeyFor` and
   `register` throw on bad segments / unknown category.
+- `packages/cache` has a `prepare` script (`tsc`): a root `npm install` builds its `dist/`, so
+  service workspaces typecheck/test against `dist/index.d.ts` with no manual build. Keep `main`/
+  `types` at `dist/`; services `require()` the compiled JS.
+- Service Dockerfiles: build context is the REPO ROOT (`context: .`), multi-stage — stage 1 copies
+  root manifests + every workspace `package.json` + the service source, `npm ci` (runs cache's
+  `prepare`), `npm run build --workspace <svc>`, `npm prune --omit=dev`; stage 2 copies
+  `node_modules` + `packages/cache/dist` + `services/<svc>/dist`. Runtime = `node dist/index.js`,
+  no tsx in prod. Compose healthcheck uses `node -e "fetch(...health...)"` — the image has no curl.
+- Self-checks that `grep` the service source for `KEYS`/`scan(` will match your OWN comments too.
+  Don't write those literal tokens in `services/*/src` — say "enumerate the keyspace" instead.
+- Service tests: live HTTP via `createApp(redis)` on `app.listen(0)` + global `fetch`; modules are
+  `commonjs` so use `__dirname`, never `import.meta.url`.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -87,4 +99,39 @@ something general and reusable — not story-specific details.
     Redis does NOT roll the rest back.
   - The 200k-member test takes ~2.3s against local compose Redis; keep an eye on total test time
     as more services add real-Redis tests.
+---
+
+## 2026-09-09 - US-003
+- Implemented `services/test-api` — the innocent-bystander reader.
+  - `src/app.ts` `createApp(redis)` returns an Express app: `GET /health` -> `{ok:true}`;
+    `GET /entitlement/:userId` validates `^u_\d{7}$` (400 otherwise), builds the index key via
+    `EntityIndex.indexKeyFor("demo","activeSubscription",userId)`, then `SMEMBERS` -> `MGET`,
+    timing only the Redis round trip with `process.hrtime.bigint()`. Responds
+    `{userId, hit: values.some(Boolean), variants: values.filter(Boolean).length, latencyMs}`.
+    `hit:false`/`variants:0` for an unseeded/invalidated user is the correct answer, no fallback.
+  - `src/index.ts` opens this service's OWN ioredis connection and wires the app on `PORT` (3001),
+    with SIGTERM/SIGINT graceful shutdown.
+  - `src/config.ts` — `TENANT`/`CATEGORY` constants + `loadConfig` (PORT, REDIS_URL).
+  - Narrow `RedisReader` interface (smembers/mget only); ioredis cast at the composition root.
+- `packages/cache/package.json` gained a `prepare` script so consumers get `dist/` on `npm install`.
+- Dockerfile: multi-stage `node:22-alpine`, build context repo root, `npm ci` + build + `npm prune
+  --omit=dev`, runtime copies node_modules + both dists, `USER node`, runs compiled JS.
+- `docker-compose.yml`: `test-api` service on 3001, `depends_on: redis: service_healthy`, node-fetch
+  healthcheck. Added `.dockerignore`.
+- Files changed: services/test-api/{package.json,Dockerfile,src/{app,index,config,app.test}.ts},
+  packages/cache/{package.json,CLAUDE.md}, services/CLAUDE.md (new), docker-compose.yml,
+  .dockerignore, package.json/package-lock.json.
+- Self-check executed: `make typecheck` exit 0; `make test` -> cache 12/12, test-api 4/4;
+  `make up` -> test-api container reports healthy; `curl /health` -> `{"ok":true}`;
+  `curl /entitlement/u_0000001` -> 200 with `latencyMs` (and `hit:true`/`variants:1` after a
+  manual SET+SADD); `curl /entitlement/bogus` -> 400;
+  `grep -rn "KEYS\|scan(" services/test-api/src` -> no matches.
+- **Learnings for future iterations:**
+  - See the new Codebase Patterns entries: the cache `prepare` build, the multi-stage service
+    Dockerfile recipe, the grep-your-own-comments trap, and the live-HTTP test style.
+  - `req.params.userId` is `string | undefined` under `noUncheckedIndexedAccess` — guard it.
+  - Express 4 does not catch async handler rejections; `readEntitlement(...).then(...).catch(next-ish)`
+    or a try/catch is required or an error becomes an unhandled rejection.
+  - The runtime image has global `fetch` (node 22) but NO `curl` — compose healthchecks must use
+    `node -e`.
 ---

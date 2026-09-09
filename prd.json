@@ -53,7 +53,7 @@
         "`make typecheck` exits 0"
       ],
       "priority": 3,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-003.md"
     },
     {
