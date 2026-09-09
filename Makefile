@@ -17,6 +17,8 @@ typecheck: node_modules
 	npm run typecheck --workspaces --if-present
 
 test: node_modules
+	docker compose up -d redis
+	@timeout 30 sh -c 'until docker compose exec -T redis redis-cli ping 2>/dev/null | grep -q PONG; do sleep 1; done'
 	npm run test --workspaces --if-present
 
 seed:

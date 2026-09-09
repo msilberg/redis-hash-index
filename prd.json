@@ -35,7 +35,7 @@
         "`make typecheck` and `make test` both exit 0"
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-002.md"
     },
     {

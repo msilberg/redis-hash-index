@@ -26,6 +26,14 @@ something general and reusable — not story-specific details.
   / `make test` fan out with `npm run <x> --workspaces --if-present`.
 - `make up` waits for health via `docker inspect --format '{{.State.Health.Status}}'` on
   `docker compose ps -q` — no `jq` dependency.
+- Tests run on `node --import tsx --test "src/**/*.test.ts"` (Node 24, tsx devDep). Use `node:test` +
+  `node:assert/strict`. `make test` now does `docker compose up -d redis` first — every service's
+  tests need a real Redis, per the spec (no mocks).
+- Import sibling modules WITHOUT a `.js` extension (`./index`), tsconfig uses `moduleResolution: node`.
+- Consumers of `packages/cache` pass their ioredis client where `RedisClient` is expected and cast
+  (`redis as unknown as RedisClient`) — the narrow interface is intentional, don't widen it.
+- `EntityIndex.parse` returns `null` for a foreign/malformed key (never throws); `indexKeyFor` and
+  `register` throw on bad segments / unknown category.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -47,4 +55,36 @@ something general and reusable — not story-specific details.
     when the real modules land.
   - Compose has no top-level `version:` key (obsolete in Compose v2).
   - Keep the three Node service Dockerfiles OUT until their stories (US-003/004/005).
+---
+
+## 2026-09-09 - US-002
+- Implemented `packages/cache` — the shared `EntityIndex` (class) with `indexKeyFor`, `parse`,
+  `register`, `invalidateEntities`, `prune`, plus a narrow `RedisClient` / `RedisMulti` /
+  `RedisPipeline` interface listing only the commands used.
+  - `register`: one MULTI — `SADD`, `EXPIRE ttl NX`, `EXPIRE ttl GT` — every reply tuple inspected;
+    returns whether the member was newly added. TTL validated as whole seconds 1..2592000 BEFORE
+    any write (rejected call writes nothing).
+  - `invalidateEntities`: per entity `SMEMBERS` -> `UNLINK` values (batched, default 500) ->
+    `SREM` observed members (batched). Never `DEL`s the set. Deletes every member unconditionally,
+    no timestamp filter. Entities processed with bounded concurrency (default 4).
+  - `prune`: pipelined `EXISTS` per member, `SREM` the missing ones. Maintenance only, not the
+    delete path.
+  - `parse` is structural + segment regex `[A-Za-z0-9_.-]+` + category check; returns null, never
+    throws. `indexKeyFor` throws on a bad segment or unknown category.
+- Tests (`src/index.test.ts`, `node:test` + real Redis on DB 15): key building / parse-null cases;
+  NX+GT sets then extends but never shortens; rejected TTL writes nothing; full invalidate removes
+  values + refs; injected `UNLINK` failure leaves the index intact and a retry finishes; a member
+  added between SMEMBERS and SREM survives; 200,000 members invalidate without a RangeError
+  (proves batching, not spreading); prune drops dead refs only. 12/12 pass.
+- Files changed: packages/cache/{src/index.ts,src/index.test.ts,package.json,CLAUDE.md},
+  Makefile (test target now brings up redis), package-lock.json.
+- Self-check executed: `make typecheck` exit 0; `make test` -> 12 pass / 0 fail.
+- **Learnings for future iterations:**
+  - `EXPIRE key ttl 'NX'` / `'GT'` works through ioredis `multi()` untyped-passthrough; the narrow
+    `RedisMulti.expire(key, seconds, 'NX'|'GT')` signature is enough and ioredis is cast in tests.
+  - `redis.multi().exec()` resolves to `[err, reply][] | null`; `null` means EXECABORT — treat as
+    an error. A queued command that fails at runtime still shows up as `[err, ...]` in the array,
+    Redis does NOT roll the rest back.
+  - The 200k-member test takes ~2.3s against local compose Redis; keep an eye on total test time
+    as more services add real-Redis tests.
 ---
