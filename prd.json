@@ -1,0 +1,151 @@
+{
+  "project": "redis-hash-index",
+  "branchName": "ralph/redis-hash-index-demo",
+  "description": "Live demo: Redis cache invalidation by keyspace scan versus a per-entity index, measured under load in Docker.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Compose skeleton, Redis, and the shared toolchain",
+      "description": "As a developer, I need `make up` to bring up Redis and a health-checkable workspace so every later story has somewhere to land.",
+      "acceptanceCriteria": [
+        "docker-compose.yml defines the `redis` service on 6379 with `--maxmemory-policy noeviction --save '' --appendonly no`",
+        "Root package.json declares npm workspaces: services/test-api, services/webhook, services/benchmark, packages/cache",
+        "Root tsconfig.base.json sets strict, noUncheckedIndexedAccess, target ES2022, module commonjs",
+        "Makefile provides: up, down, logs, typecheck, test, seed, reset, verify",
+        "`make up` starts Redis and `redis-cli -h localhost ping` returns PONG",
+        "`make typecheck` runs and exits 0 (no services yet is fine)",
+        "README section 'Quick start' documents make up / make seed / open localhost:3000"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "Full specification: tasks/US-001.md"
+    },
+    {
+      "id": "US-002",
+      "title": "packages/cache \u2014 the shared entity index",
+      "description": "As a developer, I need one tested TypeScript module implementing both the index and its invalidation, so test-api and webhook cannot drift apart.",
+      "acceptanceCriteria": [
+        "packages/cache exports EntityIndex with: indexKeyFor, parse, register, invalidateEntities, prune",
+        "register uses MULTI: SADD, then EXPIRE key ttl NX, then EXPIRE key ttl GT \u2014 and inspects every reply tuple",
+        "invalidateEntities order is SMEMBERS then UNLINK values then SREM the observed members \u2014 never DEL the set",
+        "invalidateEntities deletes every recorded member unconditionally; it must not filter by any timestamp",
+        "All multi-key commands are batched (default 500); no spread of an unbounded array",
+        "TTLs validated as whole seconds 1..2592000 BEFORE any write",
+        "Unit tests cover: NX+GT actually sets and extends an expiry; a failed UNLINK leaves the index intact and a retry completes; SREM preserves a concurrently added member",
+        "`make typecheck` and `make test` both exit 0"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Full specification: tasks/US-002.md"
+    },
+    {
+      "id": "US-003",
+      "title": "test-api service",
+      "description": "As the benchmark, I need an innocent bystander service reading the cache, so the blocking effect of a scan is observable from outside the scanning process.",
+      "acceptanceCriteria": [
+        "GET /entitlement/:userId returns {userId,hit,variants,latencyMs} per docs/API.md",
+        "It reads via SMEMBERS then MGET. It never calls KEYS or SCAN",
+        "latencyMs measures only the Redis round trip, using process.hrtime.bigint()",
+        "The service opens its OWN Redis connection, not shared with any other service",
+        "GET /health returns {ok:true}",
+        "Dockerfile builds; the service is in docker-compose.yml on 3001 with a healthcheck",
+        "`curl localhost:3001/health` returns ok after `make up`",
+        "`make typecheck` exits 0"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "Full specification: tasks/US-003.md"
+    },
+    {
+      "id": "US-004",
+      "title": "webhook service with both invalidation paths",
+      "description": "As the demo, I need the legacy and indexed eviction paths side by side behind two endpoints, so the graph can compare them under identical conditions.",
+      "acceptanceCriteria": [
+        "POST /v1/invalidate and POST /v2/invalidate both accept {userIds:[...]} and return 202 {jobId,mode,total} IMMEDIATELY",
+        "v1 runs KEYS *::<userId>::* per user then deletes the matches \u2014 the pattern must not match the index key",
+        "v2 delegates to packages/cache invalidateEntities",
+        "Work runs in the background; GET /jobs/:id reports {state,total,processed,removed}",
+        "POST /jobs/:id/stop aborts between users and sets state to stopped",
+        "GET /health returns {ok:true}; service is in compose on 3002 with a healthcheck",
+        "An integration test seeds ~200 keys, runs v1 and v2 on disjoint users, and asserts both remove every cache key for their users",
+        "`make typecheck` and `make test` exit 0"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "Full specification: tasks/US-004.md"
+    },
+    {
+      "id": "US-005",
+      "title": "benchmark service \u2014 deterministic seeder",
+      "description": "As a user, I need the fixture generated reproducibly from a seed so runs are comparable and nothing large lives in git.",
+      "acceptanceCriteria": [
+        "Seeding is deterministic from SEED_VALUE: the same seed produces byte-identical keys and values",
+        "Each user gets 1..3 variants; SEED_KEYS (default 2000000) is the number of CACHE RECORDS",
+        "Writes cache strings with TTL 3600 AND the matching index sets, using pipelines of ~20k commands",
+        "Every pipeline reply is inspected; any error aborts seeding and sets state failed",
+        "On completion it asserts DBSIZE equals the expected total and stores a marker key so restarts do not reseed",
+        "GET /api/seed/status and POST /api/seed and POST /api/seed/reset behave per docs/API.md",
+        "Progress is emitted over WebSocket as {t:'seed-progress'} frames at least once a second",
+        "`make seed` completes for SEED_KEYS=50000 in under 30 seconds and status becomes ready",
+        "`make typecheck` exits 0"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Full specification: tasks/US-005.md"
+    },
+    {
+      "id": "US-006",
+      "title": "benchmark service \u2014 run driver",
+      "description": "As a user, I need a run to poll test-api every second and fire the eviction batch a second later, so the graph shows a clean before and after.",
+      "acceptanceCriteria": [
+        "POST /api/run {mode:'v1'|'v2'} starts polling test-api once per POLL_INTERVAL_MS with a random seeded user id",
+        "After BATCH_DELAY_MS it POSTs BATCH_USERS ids (default 1000) to the matching webhook endpoint and records the returned jobId",
+        "Users sent for eviction are drawn from the seeded id space so they always exist",
+        "Each poll produces a {t:'sample'} WebSocket frame including latencyMs and the webhook job counters",
+        "POST /api/run/stop stops polling AND calls the webhook stop endpoint",
+        "Only one run may be active; a second POST /api/run returns 409",
+        "A client connecting mid-run first receives a {t:'history'} frame with the samples so far",
+        "Integration test with SEED_KEYS=50000 asserts a v2 run completes and emits samples",
+        "`make typecheck` and `make test` exit 0"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "Full specification: tasks/US-006.md"
+    },
+    {
+      "id": "US-007",
+      "title": "benchmark service \u2014 live UI",
+      "description": "As a user, I want one page with a real-time chart and three buttons so the difference is visible without reading any code.",
+      "acceptanceCriteria": [
+        "GET / serves a single self-contained HTML page \u2014 no build step, no CDN dependency required to render the chart",
+        "A time-series chart updates once per second from the WebSocket, x = seconds since run start, y = latencyMs on a LOG scale",
+        "A log scale is required: the two modes differ by ~4 orders of magnitude and a linear axis makes v2 invisible",
+        "Buttons: 'Measure legacy (KEYS) eviction', 'Measure hashed index eviction', and 'Stop'",
+        "A marker or shaded band shows the moment the eviction batch was dispatched",
+        "A status strip shows seed state, key count, run mode, and webhook job progress",
+        "If the fixture is not seeded the run buttons are disabled and a Seed button is shown instead",
+        "The page reconnects the WebSocket automatically and redraws from the history frame",
+        "Verified in a browser: both runs start, the chart moves, Stop halts it"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "Full specification: tasks/US-007.md"
+    },
+    {
+      "id": "US-008",
+      "title": "End-to-end verification and documentation",
+      "description": "As a visitor to the repo, I need one command that proves the whole thing works, and a README that shows the result.",
+      "acceptanceCriteria": [
+        "`make verify` brings the stack up, seeds SEED_KEYS=50000, runs v2 end to end, asserts the target users' keys are gone, and exits non-zero on any failure",
+        "README documents: quick start, the two runs and what each graph should look like, memory and timing expectations, and the honest caveats from docs/ARCHITECTURE.md",
+        "README states that a 1000-user v1 batch is not meant to finish, and why",
+        "README links docs/REDIS-SCHEMA.md, docs/API.md, docs/ARCHITECTURE.md, docs/BENCHMARK-BASELINE.md",
+        "A screenshot or captured sample output of each run is committed under docs/",
+        "`make typecheck`, `make test` and `make verify` all exit 0 from a clean clone"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Full specification: tasks/US-008.md"
+    }
+  ]
+}

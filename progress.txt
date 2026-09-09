@@ -1,0 +1,20 @@
+# Ralph Progress Log
+Started: (not yet run)
+---
+
+## Codebase Patterns
+
+Seeded from the specification before the first iteration. Add to this section whenever you learn
+something general and reusable — not story-specific details.
+
+- Read `tasks/US-XXX.md` for the story you are on before touching code; `prd.json` holds only the
+  acceptance criteria, the reasoning is in the task file.
+- `docs/REDIS-SCHEMA.md` is the contract shared by all three services. Change it in one place or
+  the demo silently stops proving anything.
+- `SADD` creates a PERSISTENT key: `EXPIRE ... GT` alone will never set an expiry. Use `NX` then `GT`.
+- Invalidation deletes values BEFORE removing index references, so a failed run is retry-safe.
+- `SREM` the members you observed; never `DEL` the index set, or you discard concurrent writes.
+- The v1 legacy pattern is `*::<userId>::*` — both delimiters, or it matches the index key too.
+- Redis runs with `--maxmemory-policy noeviction`. If it evicts the fixture, the benchmark lies.
+- Every Redis pipeline reply must be inspected. A silently dropped `SET` shrinks the keyspace and
+  flatters the wrong side of the comparison.
