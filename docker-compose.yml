@@ -8,3 +8,21 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  test-api:
+    build:
+      context: .
+      dockerfile: services/test-api/Dockerfile
+    ports: ["3001:3001"]
+    environment:
+      PORT: "3001"
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

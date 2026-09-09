@@ -13,6 +13,12 @@ imported twice — never re-implement key building or invalidation elsewhere.
   throws. `indexKeyFor` / `register` throw on a bad segment or unknown category.
 - TTLs are validated (`1..2592000`, whole seconds) before any write. A rejected call writes nothing.
 
+## Building
+
+`prepare` runs `tsc` on `npm install`, so a fresh `npm install` at the repo root leaves `dist/`
+in place and service workspaces can typecheck/test against `dist/index.d.ts` with no extra step.
+Keep `main`/`types` pointed at `dist/` — services `require()` the compiled JS at runtime.
+
 ## Tests
 
 Real Redis only (no mocks) — NX/GT expiry, MULTI-without-rollback and the SREM-vs-concurrent-writer
