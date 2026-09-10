@@ -55,7 +55,7 @@ describe("indexKeyFor / parse", () => {
     assert.deepEqual(parsed, {
       service: "test-api",
       tenant: TENANT,
-      category: CATEGORY,
+      entity: CATEGORY,
       entityId: USER,
       params: '{"v":2}',
       indexKey: INDEX_KEY,

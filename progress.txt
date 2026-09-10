@@ -52,7 +52,7 @@ something general and reusable — not story-specific details.
   EXCEPTION: `services/webhook` v1 path legitimately calls `redis.keys('*::<userId>::*')`.
 - Services that accept a JSON body need `app.use(express.json())`. Long work: `void runJob(...)`
   then `res.status(202)` immediately; the worker owns all its own error handling and sets
-  `job.state`. Job store is an in-memory `Map` created INSIDE `createApp` so tests are isolated.
+  `job.state`. Job store is an in-memory `Map` held by the controller created per `createApp` call so tests are isolated.
 - The v1 KEYS pattern keeps both `::` so it never matches the index key (name ends at the id).
   v1 therefore leaves index sets behind (they TTL out); only v2 empties them via `SREM`.
 - Service tests: live HTTP via `createApp(redis)` on `app.listen(0)` + global `fetch`; modules are
@@ -445,4 +445,24 @@ something general and reusable — not story-specific details.
     resolution is deprecated in TypeScript 6 and removed in TypeScript 7.
   - Node16 resolution requires a compatible module setting; changing only moduleResolution
     while leaving module: commonjs is not a valid migration.
+---
+
+## 2026-09-10 - US-003 / US-004 follow-up: service controllers
+- Extracted TestApiController and WebhookController; app.ts files now wire middleware and routes.
+  Added separate startJobV1/startJobV2 handlers without a mode argument, retaining shared job
+  lifecycle helpers, immediate 202 responses, and per-app job isolation.
+- Fixed the stale cache parse assertion to expect entity after the existing category-to-entity
+  rename; preserved that implementation change and the existing cache version/lockfile bump.
+  Extended webhook assertions for the v2 response mode/total and invalid bodies on both routes.
+- Files changed: services/{test-api,webhook}/src/{app,controller}.ts,
+  services/webhook/src/app.test.ts, packages/cache/src/index.test.ts, progress.txt.
+  Existing cache source and package/lockfile changes are included in the verified workspace.
+- Verification: cache build, make typecheck, make test (45 passing), and git diff --check passed.
+  The first test run caught the stale cache assertion; all service tests already passed.
+  Kept the current patch branch for this explicit follow-up; no PRD pass flags changed.
+- **Learnings for future iterations:**
+  - Controller route handlers use arrow properties so Express callbacks retain their instance.
+    app.ts re-exports the existing types to preserve imports.
+  - Rebuild packages/cache before verifying consumers after shared source changes, because
+    services load its compiled dist output while cache tests load source directly.
 ---

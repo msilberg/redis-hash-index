@@ -43,7 +43,7 @@ export interface EntityIndexOptions {
 export interface ParsedCacheKey {
   service: string;
   tenant: string;
-  category: string;
+  entity: string;
   entityId: string;
   /** Opaque variant tail — never interpreted, only carried. */
   params: string;
@@ -125,13 +125,13 @@ export class EntityIndex {
     if (parts.length < 5) return null;
     const service = parts[0];
     const tenant = parts[1];
-    const category = parts[2];
+    const entity = parts[2];
     const entityId = parts[3];
     const params = parts.slice(4).join(KEY_DELIMITER);
     if (
       service === undefined ||
       tenant === undefined ||
-      category === undefined ||
+      entity === undefined ||
       entityId === undefined ||
       params.length === 0
     ) {
@@ -140,19 +140,19 @@ export class EntityIndex {
     if (
       !SEGMENT_RE.test(service) ||
       !SEGMENT_RE.test(tenant) ||
-      !SEGMENT_RE.test(category) ||
+      !SEGMENT_RE.test(entity) ||
       !SEGMENT_RE.test(entityId)
     ) {
       return null;
     }
-    if (!this.categories.has(category)) return null;
+    if (!this.categories.has(entity)) return null;
     return {
       service,
       tenant,
-      category,
+      entity,
       entityId,
       params,
-      indexKey: [INDEX_PREFIX, tenant, category, entityId].join(KEY_DELIMITER),
+      indexKey: [INDEX_PREFIX, tenant, entity, entityId].join(KEY_DELIMITER),
     };
   }
 
