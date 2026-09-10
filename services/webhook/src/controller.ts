@@ -10,7 +10,7 @@
 // Both endpoints return 202 immediately with {jobId,mode,total}; the work runs in the background
 // and is observable through GET /jobs/:id. A 1,000-user v1 batch is not meant to finish.
 
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { EntityIndex, type EntityFailure, type RedisClient } from "@redis-hash-index/cache";
 import type { Request, Response } from "express";
 import { randomBytes } from "node:crypto";
 import { BATCH_SIZE, CATEGORY, TENANT } from "./config";
@@ -34,6 +34,7 @@ export interface Job {
   startedAt: string;
   finishedAt: string | null;
   error?: string;
+  incomplete: EntityFailure[];
 }
 
 /** The slice of a Redis client the legacy path touches directly. */
@@ -110,6 +111,7 @@ export class WebhookController {
       removed: 0,
       startedAt: new Date().toISOString(),
       finishedAt: null,
+      incomplete: [],
     };
     this.jobs.set(job.jobId, job);
     return job;
@@ -124,14 +126,28 @@ export class WebhookController {
     try {
       for (const userId of userIds) {
         if (job.state === "stopped") break;
-        const removed =
-          job.mode === JobMode.V1
-            ? await this.invalidateLegacy(userId)
-            : (await this.index.invalidateEntities(TENANT, CATEGORY, [userId])).valuesUnlinked;
+        try {
+          if (job.mode === JobMode.V1) {
+            job.removed += await this.invalidateLegacy(userId);
+          } else {
+            // Deliberately one entity: progress and Stop stay exact between users. The package's
+            // concurrency applies to multi-entity callers and is exercised in its batch tests.
+            const result = await this.index.invalidateEntities(TENANT, CATEGORY, [userId]);
+            job.removed += result.valuesUnlinked;
+            job.incomplete.push(...result.incomplete);
+          }
+        } catch (err) {
+          job.incomplete.push({
+            entityId: userId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         job.processed += 1;
-        job.removed += removed;
       }
-      if (job.state === "running") job.state = "done";
+      if (job.incomplete.length > 0) {
+        job.error = `${job.incomplete.length} entities could not be invalidated`;
+      }
+      if (job.state === "running") job.state = job.incomplete.length > 0 ? "failed" : "done";
     } catch (err) {
       job.state = "failed";
       job.error = err instanceof Error ? err.message : String(err);

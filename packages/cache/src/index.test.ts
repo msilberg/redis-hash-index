@@ -136,6 +136,7 @@ describe("invalidateEntities", () => {
     let failed = false;
     const flaky: RedisClient = {
       smembers: (k) => redis.smembers(k),
+      sscan: (k, cursor, count, size) => redis.sscan(k, cursor, count, size),
       srem: (k, ...m) => redis.srem(k, ...m),
       multi: () => redis.multi() as unknown as ReturnType<RedisClient["multi"]>,
       pipeline: () => redis.pipeline() as unknown as ReturnType<RedisClient["pipeline"]>,
@@ -145,7 +146,10 @@ describe("invalidateEntities", () => {
       },
     };
 
-    await assert.rejects(new EntityIndex(flaky, { categories: [CATEGORY] }).invalidateEntities(TENANT, CATEGORY, [USER]));
+    const result = await new EntityIndex(flaky, { categories: [CATEGORY] })
+      .invalidateEntities(TENANT, CATEGORY, [USER]);
+    assert.equal(result.entities, 0);
+    assert.deepEqual(result.incomplete, [{ entityId: USER, error: "injected UNLINK failure" }]);
     assert.equal(failed, true);
 
     // Index intact: nothing was removed because values are deleted before references.
@@ -167,6 +171,7 @@ describe("invalidateEntities", () => {
     const raced = cacheKey(USER, 9);
     let injected = false;
     const racyClient: RedisClient = {
+      sscan: (k, cursor, count, size) => redis.sscan(k, cursor, count, size),
       srem: (k, ...m) => redis.srem(k, ...m),
       unlink: (...k) => redis.unlink(...k),
       multi: () => redis.multi() as unknown as ReturnType<RedisClient["multi"]>,
@@ -216,5 +221,162 @@ describe("prune", () => {
     assert.equal(result.membersChecked, 2);
     assert.equal(result.membersRemoved, 1);
     assert.deepEqual(await redis.smembers(INDEX_KEY), [cacheKey(USER, 1)]);
+  });
+});
+
+describe("registerMany", () => {
+  it("writes values and references across bounded transactions with NX/GT and duplicate handling", async () => {
+    const index = new EntityIndex(redis as unknown as RedisClient, {
+      categories: [CATEGORY], batchSize: 2,
+    });
+    const records = [1, 2, 3].map((v) => ({
+      cacheKey: cacheKey(USER, v), value: "value", ttlSeconds: v === 2 ? 200 : 100,
+    }));
+    assert.equal(await index.registerMany(records), 3);
+    assert.equal(await index.registerMany(records), 0);
+    assert.equal(await index.register(cacheKey(USER, 1), 50), false);
+    assert.ok((await redis.ttl(INDEX_KEY)) > 150);
+    for (const record of records) {
+      assert.equal(await redis.get(record.cacheKey), "value");
+      assert.ok((await redis.ttl(record.cacheKey)) > 0);
+    }
+    assert.deepEqual((await redis.smembers(INDEX_KEY)).sort(), records.map((r) => r.cacheKey));
+    assert.equal(await index.registerMany([]), 0);
+  });
+
+  it("validates the entire batch before any writes, even beyond a transaction boundary", async () => {
+    const index = new EntityIndex(redis as unknown as RedisClient, {
+      categories: [CATEGORY], batchSize: 1,
+    });
+    const valid = { cacheKey: cacheKey(USER, 1), value: "x", ttlSeconds: 100 };
+    for (const invalid of [
+      { ...valid, ttlSeconds: 0 },
+      { ...valid, cacheKey: "malformed" },
+      { ...valid, cacheKey: cacheKey(USER, 2).replace(CATEGORY, "unknown") },
+    ]) {
+      await assert.rejects(index.registerMany([valid, invalid]));
+      assert.equal(await redis.dbsize(), 0);
+    }
+  });
+
+  it("reports a runtime MULTI error rather than silently accepting a partial write", async () => {
+    await redis.set(INDEX_KEY, "wrong type");
+    await assert.rejects(newIndex().registerMany([
+      { cacheKey: cacheKey(USER, 1), value: "x", ttlSeconds: 100 },
+    ]), /WRONGTYPE/);
+    // Redis does not roll back SET when SADD fails at runtime.
+    assert.equal(await redis.get(cacheKey(USER, 1)), "x");
+  });
+});
+
+describe("batch failure reporting", () => {
+  it("continues other entities, retains partial counters, and retries only the incomplete IDs", async () => {
+    const goodUser = "u_0000043";
+    const index = newIndex();
+    await index.registerMany([USER, goodUser].flatMap((user) =>
+      [1, 2].map((v) => ({ cacheKey: cacheKey(user, v), value: "x", ttlSeconds: 100 })),
+    ));
+    let active = 0;
+    let peak = 0;
+    const client = new Proxy(redis, {
+      get(target, prop) {
+        if (prop === "smembers") return async (key: string) => {
+          active += 1;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          try { return await target.smembers(key); } finally { active -= 1; }
+        };
+        if (prop === "unlink") return async (...keys: string[]) => {
+          if (keys.includes(cacheKey(USER, 2))) throw new Error("second batch failed");
+          return target.unlink(...keys);
+        };
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await new EntityIndex(client as unknown as RedisClient, {
+      categories: [CATEGORY], batchSize: 1, concurrency: 2,
+    }).invalidateEntities(TENANT, CATEGORY, [USER, goodUser]);
+    assert.equal(peak, 2);
+    assert.equal(result.entities, 1);
+    assert.equal(result.membersObserved, 4);
+    // SMEMBERS order is unspecified, so one or zero of the failing user's values was removed.
+    assert.equal(result.valuesUnlinked, 4 - await redis.exists(
+      cacheKey(USER, 1), cacheKey(USER, 2), cacheKey(goodUser, 1), cacheKey(goodUser, 2),
+    ));
+    assert.equal(result.referencesRemoved, 2);
+    assert.deepEqual(result.incomplete, [{ entityId: USER, error: "second batch failed" }]);
+    assert.equal(await redis.scard(INDEX_KEY), 2);
+    const retry = await index.invalidateEntities(TENANT, CATEGORY, result.incomplete.map((f) => f.entityId));
+    assert.deepEqual(retry.incomplete, []);
+    assert.equal(retry.entities, 1);
+    assert.equal(await redis.dbsize(), 0);
+  });
+});
+
+describe("cursor pruning", () => {
+  it("continues empty pages, tolerates duplicates, and chunks oversized scan replies", async () => {
+    const live = cacheKey(USER, 1);
+    const missing = [2, 3, 4].map((v) => cacheKey(USER, v));
+    await redis.set(live, "x");
+    await redis.sadd(INDEX_KEY, live, ...missing);
+    const pages: Array<[string, string[]]> = [
+      ["1", []], ["2", [live, ...missing]], ["0", [live, ...missing]],
+    ];
+    let calls = 0;
+    const client = new Proxy(redis, {
+      get(target, prop) {
+        if (prop === "sscan") return async () => {
+          const page = pages[calls++];
+          assert.ok(page, "cursor should stop at zero");
+          return page;
+        };
+        if (prop === "srem") return async (key: string, ...members: string[]) => {
+          assert.ok(members.length <= 2);
+          return target.srem(key, ...members);
+        };
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await new EntityIndex(client as unknown as RedisClient, {
+      categories: [CATEGORY], batchSize: 2,
+    }).prune(TENANT, CATEGORY, USER);
+    assert.equal(calls, 3);
+    assert.equal(result.membersChecked, 8);
+    assert.equal(result.membersRemoved, 3);
+    assert.deepEqual(await redis.smembers(INDEX_KEY), [live]);
+  });
+
+  it("walks a large set incrementally, keeping live values and bounding removal batches", async () => {
+    const records = Array.from({ length: 5000 }, (_, v) => ({
+      cacheKey: cacheKey(USER, v), ttlSeconds: 100,
+      ...(v % 10 === 0 ? { value: "live" } : {}),
+    }));
+    await newIndex().registerMany(records);
+    let scans = 0;
+    const client = new Proxy(redis, {
+      get(target, prop) {
+        if (prop === "smembers") return () => { throw new Error("prune must not SMEMBERS"); };
+        if (prop === "sscan") return async (key: string, cursor: string, count: "COUNT", size: number) => {
+          scans += 1;
+          return target.sscan(key, cursor, count, size);
+        };
+        if (prop === "srem") return async (key: string, ...members: string[]) => {
+          assert.ok(members.length <= 17);
+          return target.srem(key, ...members);
+        };
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const result = await new EntityIndex(client as unknown as RedisClient, {
+      categories: [CATEGORY], batchSize: 17,
+    }).prune(TENANT, CATEGORY, USER);
+    assert.ok(scans > 1);
+    assert.ok(result.membersChecked >= 5000);
+    assert.equal(result.membersRemoved, 4500);
+    assert.equal(await redis.scard(INDEX_KEY), 500);
+    assert.equal((await newIndex().prune(TENANT, CATEGORY, "u_9999999")).membersChecked, 0);
   });
 });

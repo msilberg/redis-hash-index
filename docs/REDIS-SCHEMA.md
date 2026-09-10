@@ -47,6 +47,11 @@ counts as *infinite* for a `GT` comparison — so `EXPIRE ... GT` on its own ret
 the index never expires. It must be `EXPIRE key ttl NX` (establish) followed by
 `EXPIRE key ttl GT` (extend, never shorten), both inside one `MULTI`.
 
+The fixture writer uses `EntityIndex.registerMany()` from the shared package. With a supplied
+value, `SET key value EX ttl` is in the same bounded transaction as the three registration
+commands. The single-key `register()` method uses the same implementation. All records are
+validated before writes; Redis runtime failures are checked but cannot be rolled back.
+
 ## The two invalidation paths
 
 ### v1 — legacy, O(N) scan

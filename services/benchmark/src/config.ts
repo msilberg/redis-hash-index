@@ -56,7 +56,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     redisUrl: env.REDIS_URL ?? "redis://localhost:6379",
     seedKeys: intFromEnv(env.SEED_KEYS, 2_000_000, "SEED_KEYS", 1, 1_000_000_000),
     seedValue: intFromEnv(env.SEED_VALUE, 1, "SEED_VALUE", 0, 0xffff_ffff),
-    // ~20k commands per pipeline keeps memory bounded while staying well under Redis's limits.
+    // Buffer ~20k commands; registerMany splits these into bounded pipelined transactions.
     pipelineSize: intFromEnv(env.SEED_PIPELINE_SIZE, 20_000, "SEED_PIPELINE_SIZE", 1, 5_000_000),
     testApiBaseUrl: env.TEST_API_URL ?? "http://test-api:3001",
     webhookBaseUrl: env.WEBHOOK_URL ?? "http://webhook:3002",

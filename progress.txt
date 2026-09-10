@@ -4,6 +4,13 @@ Started: (not yet run)
 
 ## Codebase Patterns
 
+- Fixture writes go through `EntityIndex.registerMany` with values, using the same NX/GT logic
+  as `register`. Each bounded MULTI includes SET EX and registration; runtime errors do not roll back.
+- `invalidateEntities` returns per-entity failures in `incomplete`; callers must inspect it.
+  Counters include acknowledged partial work, and the entities count includes only successes.
+- `prune` uses SSCAN pages: COUNT is a hint, cursors may yield empty pages or duplicate members.
+  Keep per-page checks/removals bounded and count observations rather than unique members.
+
 - For the 1 Hz chart, request `getContext("2d", { willReadFrequently: true })` to prefer
   software rendering. Chrome's accelerated canvas failed to display the chart on this machine;
   switching the context restored full redraws. Verify canvas changes visually in Chrome.
@@ -465,4 +472,33 @@ something general and reusable — not story-specific details.
     app.ts re-exports the existing types to preserve imports.
   - Rebuild packages/cache before verifying consumers after shared source changes, because
     services load its compiled dist output while cache tests load source directly.
+---
+
+## 2026-09-11 - US-002 follow-up: address implementation review
+- Added registerMany with complete input validation and bounded, pipelined MULTI transactions.
+  register delegates to it; the seeder supplies values so SET EX and NX/GT registration share
+  each transaction. Removed the seeder's duplicate registration commands.
+- Added incomplete entity/error results, continuing healthy entities and retaining acknowledged
+  partial counters. Webhook jobs expose failed IDs for targeted retries and count attempted users.
+  Documented the deliberate single-entity v2 calls and Stop behavior.
+- Changed prune to SSCAN with bounded per-page EXISTS/SREM and no full-set accumulator.
+  Explicitly documented unscheduled pruning, fixture TTL policy, and concurrent-write limitations.
+- Clarified SET versus HASH in README and embedded real Chrome screenshots at the default 2M
+  fixture: legacy ~1 second latency at 16/1000 users after 33s; v2 low milliseconds, 1000/1000 done.
+  Reseeded between runs and stopped both via the UI. Existing 50k JSON samples are retained.
+- Files changed: packages/cache/src/{index,index.test}.ts; services/benchmark/src/
+  {seeder,seeder.test,config}.ts; services/webhook/src/{controller,app.test}.ts;
+  README.md; docs/{API,ARCHITECTURE,REDIS-SCHEMA}.md; docs/run-{legacy,index}.jpg; progress.txt.
+- Verification: cache build and make typecheck passed; make test passed, then npm test passed
+  all 52 tests after adding the final empty/duplicate/oversized SSCAN-page case.
+  make verify passed: seeded 49,961 cache + 25,000 index keys, invalidated 1000 users,
+  removed 2011 values, no incomplete entities, exact DBSIZE drop 3011, control user retained.
+  Default make up and forced reseed produced the same 2,999,196 fixture keys in 52s and 51s.
+  git diff --check passed. No PRD pass flags changed; this is an explicit review follow-up.
+- **Learnings for future iterations:**
+  - MULTI prevents interleaving but not runtime-error partial writes; a real WRONGTYPE test
+    now verifies both shared registration failure and absence of a seed completion marker.
+  - Concurrent workers must await a reply into a local variable before updating shared counters;
+    counter += await operation() can overwrite another worker's update.
+  - Browser screenshots arrive as JPEG bytes; preserve .jpg filenames rather than assuming PNG.
 ---

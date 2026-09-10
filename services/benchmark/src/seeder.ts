@@ -4,7 +4,7 @@
 
 import { EventEmitter } from "node:events";
 
-import type { EntityIndex } from "@redis-hash-index/cache";
+import type { EntityIndex, Registration } from "@redis-hash-index/cache";
 
 import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT } from "./config";
 import { expectedTotals, generateUsers, type ExpectedTotals } from "./fixture";
@@ -44,19 +44,11 @@ export interface SeedMarker {
 
 /** The slice of a Redis client the seeder touches. */
 export interface SeederRedis {
-  pipeline(): SeederPipeline;
   dbsize(): Promise<number>;
   get(key: string): Promise<string | null>;
   set(key: string, value: string): Promise<unknown>;
   flushdb(): Promise<unknown>;
   info(section: string): Promise<string>;
-}
-
-export interface SeederPipeline {
-  set(key: string, value: string, mode: "EX", seconds: number): SeederPipeline;
-  sadd(key: string, ...members: string[]): SeederPipeline;
-  expire(key: string, seconds: number, mode: "NX" | "GT"): SeederPipeline;
-  exec(): Promise<Array<[Error | null, unknown]> | null>;
 }
 
 export interface SeederConfig {
@@ -184,43 +176,26 @@ export class Seeder extends EventEmitter {
       // Start from a clean slate so the DBSIZE assertion is exact and a reseed is deterministic.
       await this.redis.flushdb();
 
-      let pipe = this.redis.pipeline();
-      let queued = 0;
+      let records: Registration[] = [];
+      let queuedUsers = 0;
       const flush = async (): Promise<void> => {
-        if (queued === 0) return;
-        const replies = await pipe.exec();
-        if (replies === null) {
-          throw new Error("seed pipeline aborted (EXECABORT)");
-        }
-        for (const [err] of replies) {
-          if (err) throw err;
-        }
-        pipe = this.redis.pipeline();
-        queued = 0;
+        if (records.length === 0) return;
+        await this.index.registerMany(records);
+        this.done += records.length + queuedUsers;
+        records = [];
+        queuedUsers = 0;
       };
 
       const indexKeyFor = (userId: string): string =>
         this.index.indexKeyFor(TENANT, CATEGORY, userId);
 
       for (const user of generateUsers(this.config.seedKeys, this.config.seedValue, indexKeyFor)) {
-        const members: string[] = [];
         for (const record of user.records) {
-          pipe.set(record.cacheKey, record.value, "EX", CACHE_TTL_SECONDS);
-          members.push(record.cacheKey);
-          queued += 1;
-          this.done += 1;
+          records.push({ ...record, ttlSeconds: CACHE_TTL_SECONDS });
         }
-        // SADD establishes a persistent key; EXPIRE NX arms it, EXPIRE GT would only ever extend it.
-        // The pipeline preserves order on the connection, so NX lands before GT. See trap #1.
-        pipe.sadd(user.indexKey, ...members);
-        pipe.expire(user.indexKey, CACHE_TTL_SECONDS, "NX");
-        pipe.expire(user.indexKey, CACHE_TTL_SECONDS, "GT");
-        queued += 3;
-        this.done += 1;
-
-        if (queued >= this.config.pipelineSize) {
-          await flush();
-        }
+        queuedUsers += 1;
+        // Four commands per record. The shared writer further bounds each transaction.
+        if (records.length * 4 >= this.config.pipelineSize) await flush();
       }
       await flush();
 

@@ -1,6 +1,7 @@
 # redis-hash-index
 
 Two ways to invalidate a Redis cache, measured under load, against one Redis.
+Despite the repository name, the per-entity index is a Redis **SET**, not a HASH.
 
 - **v1 — the legacy path.** For each user, scan the whole keyspace with `KEYS *::<userId>::*`
   to find their cache keys, then delete the matches. O(N) per user, N = every key in Redis.
@@ -61,22 +62,28 @@ The y axis is **latencyMs on a log scale** — the two modes differ by about fou
 magnitude and a linear axis makes v2 invisible. A shaded marker shows the moment the eviction
 batch was dispatched.
 
-**Measure hashed index eviction (v2)** — `docs/run-index.json`. The latency line does not move.
+**Measure hashed index eviction (v2)**. The latency line does not move.
 A thousand users are invalidated in well under a second. The chart is boring, which is the
 argument.
 
-**Measure legacy (KEYS) eviction (v1)** — `docs/run-legacy.json`. At the full 2M+ fixture the
+**Measure legacy (KEYS) eviction (v1)**. At the full 2M+ fixture the
 latency line steps from about a millisecond to ~2 seconds on the very first scan and stays there,
-one step per user. The webhook `processed` counter crawls (~20 users/sec).
+one step per user. The webhook `processed` counter crawls; its rate depends on the fixture and host.
 
-> **About the committed samples.** This repo was built in an environment with no browser tooling,
-> so `docs/run-legacy.json` and `docs/run-index.json` are the captured WebSocket frames of a run
-> rather than screenshots. They were taken at `SEED_KEYS=50000` — small enough that a `KEYS` scan
-> over ~75k keys is still sub-millisecond, so the v1 sample shows the **`processed` crawl** clearly
-> but not the latency spike. The four-orders-of-magnitude step needs the 2M+ fixture; the
-> [reference numbers](#5-why-the-legacy-run-does-not-finish) below are from that scale. Regenerate
-> either file with `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>` against a running,
-> seeded stack.
+Actual browser captures from the default fixture (`SEED_KEYS=2000000`, seed 1, 1,999,196 cache
+records plus 1,000,000 index sets), taken on September 10, 2026 (UTC):
+
+![Legacy eviction: a sustained seconds-scale latency rise after dispatch](docs/run-legacy.jpg)
+
+![Indexed eviction: low latency and all 1,000 users completed](docs/run-index.jpg)
+
+These are single runs on this development host, not the reference-machine timings below.
+The legacy run was stopped early; the fixture was reseeded before the indexed run.
+
+The older [legacy](docs/run-legacy.json) and [indexed](docs/run-index.json) WebSocket captures
+use `SEED_KEYS=50000`. At that smaller scale they show job progress but not the large-fixture
+latency rise. Regenerate captures with
+`node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>` against a running, seeded stack.
 
 ## 4. Costs
 
@@ -124,6 +131,11 @@ scan.
   the pipelines here would need slot-aware routing on Redis Cluster.
 - Redis runs with `--maxmemory-policy noeviction`. If it evicted the fixture the keyspace would
   shrink, the scan would speed up, and the benchmark would quietly start lying.
+- The seeder uses the shared transactional `registerMany()` writer. Pruning is available but
+  not scheduled; fixture index sets expire after one hour. See the
+  [registration and maintenance policy](docs/ARCHITECTURE.md#registration-and-maintenance-policy).
+- Webhook v2 deliberately processes one entity at a time for precise progress and Stop behavior.
+  Failed IDs are reported in `incomplete` for targeted retries; see [the job API](docs/API.md).
 
 ## 7. Documentation
 
@@ -133,6 +145,7 @@ scan.
 | [docs/API.md](docs/API.md) | Endpoint contracts for all three services |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Why the services are split this way |
 | [docs/BENCHMARK-BASELINE.md](docs/BENCHMARK-BASELINE.md) | Reference measurements and method |
+| [docs/run-index.jpg](docs/run-index.jpg) · [docs/run-legacy.jpg](docs/run-legacy.jpg) | Live browser captures with the default 2M fixture |
 | [docs/run-index.json](docs/run-index.json) · [docs/run-legacy.json](docs/run-legacy.json) | Captured WebSocket frames from each run |
 | [tasks/](tasks/) | The eight build stories, in full |
 

@@ -10,6 +10,7 @@
  */
 export interface RedisClient {
   smembers(key: string): Promise<string[]>;
+  sscan(key: string, cursor: string, count: "COUNT", size: number): Promise<[string, string[]]>;
   srem(key: string, ...members: string[]): Promise<number>;
   unlink(...keys: string[]): Promise<number>;
   multi(): RedisMulti;
@@ -18,6 +19,7 @@ export interface RedisClient {
 
 /** A `MULTI` chain. `exec()` yields one `[error, reply]` tuple per queued command, or `null` on abort. */
 export interface RedisMulti {
+  set(key: string, value: string, mode: "EX", seconds: number): RedisMulti;
   sadd(key: string, member: string): RedisMulti;
   expire(key: string, seconds: number, mode: "NX" | "GT"): RedisMulti;
   exec(): Promise<Array<[Error | null, unknown]> | null>;
@@ -34,7 +36,7 @@ export interface EntityIndexOptions {
   categories: Iterable<string>;
   /** Default TTL, in whole seconds. Only a convenience for callers — `register` still takes one explicitly. */
   ttlSeconds?: number;
-  /** Max keys per multi-key command (`UNLINK`, `SREM`, pipelined `EXISTS`). */
+  /** Max registrations per transaction and keys per multi-key command (`UNLINK`, `SREM`, pipelined `EXISTS`). */
   batchSize?: number;
   /** How many entities `invalidateEntities` works on at once. */
   concurrency?: number;
@@ -51,8 +53,20 @@ export interface ParsedCacheKey {
   indexKey: string;
 }
 
+export interface Registration {
+  cacheKey: string;
+  ttlSeconds: number;
+  /** When supplied, SET EX runs in the same transaction as registration. */
+  value?: string;
+}
+
+export interface EntityFailure {
+  entityId: string;
+  error: string;
+}
+
 export interface InvalidationResult {
-  /** Entities processed. */
+  /** Entities successfully completed; failed entities are listed in incomplete. */
   entities: number;
   /** Total members read across every entity's `SMEMBERS`. */
   membersObserved: number;
@@ -60,10 +74,12 @@ export interface InvalidationResult {
   valuesUnlinked: number;
   /** Sum of `SREM` replies — index references actually removed. */
   referencesRemoved: number;
+  incomplete: EntityFailure[];
 }
 
 export interface PruneResult {
   indexKey: string;
+  /** Scan observations, possibly including duplicates (SSCAN is not a snapshot). */
   membersChecked: number;
   /** References dropped because their cache value no longer exists. */
   membersRemoved: number;
@@ -166,29 +182,55 @@ export class EntityIndex {
    * @returns `true` if the member was newly added, `false` if it was already present.
    */
   async register(cacheKey: string, ttlSeconds: number): Promise<boolean> {
-    assertValidTtl(ttlSeconds);
-    const parsed = this.parse(cacheKey);
-    if (parsed === null) {
-      throw new Error(`not a valid cache key for this index: ${cacheKey}`);
+    return (await this.registerMany([{ cacheKey, ttlSeconds }])) === 1;
+  }
+
+  /**
+   * Register a batch using the same NX/GT rule as register(). Optional values are written with
+   * SET EX inside the transaction, closing the write/registration interleaving window.
+   * Validate the entire input before writes, then pipeline at most batchSize records per MULTI.
+   * Returns the count of newly added references. Runtime Redis errors do not roll back writes;
+   * callers must treat a rejection as potentially partial and retry or rebuild their fixture.
+   */
+  async registerMany(records: readonly Registration[]): Promise<number> {
+    const validated = records.map((record) => {
+      assertValidTtl(record.ttlSeconds);
+      const parsed = this.parse(record.cacheKey);
+      if (parsed === null) {
+        throw new Error(`not a valid cache key for this index: ${record.cacheKey}`);
+      }
+      return { ...record, indexKey: parsed.indexKey };
+    });
+
+    let added = 0;
+    for (const batch of chunk(validated, this.batchSize)) {
+      const multi = this.redis.multi();
+      const addOffsets: number[] = [];
+      let commands = 0;
+      for (const { cacheKey, indexKey, ttlSeconds, value } of batch) {
+        if (value !== undefined) {
+          multi.set(cacheKey, value, "EX", ttlSeconds);
+          commands += 1;
+        }
+        addOffsets.push(commands);
+        multi.sadd(indexKey, cacheKey);
+        multi.expire(indexKey, ttlSeconds, "NX");
+        multi.expire(indexKey, ttlSeconds, "GT");
+        commands += 3;
+      }
+      const replies = await multi.exec();
+      if (replies === null) throw new Error("MULTI aborted while registering cache keys");
+      if (replies.length !== commands) {
+        throw new Error(`expected ${commands} replies from register MULTI, got ${replies.length}`);
+      }
+      for (const [err] of replies) {
+        if (err) throw err;
+      }
+      for (const offset of addOffsets) {
+        if (replies[offset]?.[1] === 1) added += 1;
+      }
     }
-    const { indexKey } = parsed;
-    const replies = await this.redis
-      .multi()
-      .sadd(indexKey, cacheKey)
-      .expire(indexKey, ttlSeconds, "NX")
-      .expire(indexKey, ttlSeconds, "GT")
-      .exec();
-    if (replies === null) {
-      throw new Error(`MULTI aborted while registering ${cacheKey}`);
-    }
-    if (replies.length !== 3) {
-      throw new Error(`expected 3 replies from register MULTI, got ${replies.length}`);
-    }
-    for (const [err] of replies) {
-      if (err) throw err;
-    }
-    const addReply = replies[0];
-    return addReply !== undefined && addReply[1] === 1;
+    return added;
   }
 
   /**
@@ -200,30 +242,41 @@ export class EntityIndex {
    *
    * Every recorded member is deleted unconditionally — no timestamp check. Deleting an absent key
    * is free; skipping a live one because a clock ran fast is a correctness bug.
+   * Per-entity Redis errors are collected in incomplete; other entities continue. Counters include
+   * acknowledged commands from partially completed entities. Invalid coordinates reject before I/O.
    */
   async invalidateEntities(
     tenant: string,
     category: string,
     entityIds: readonly string[],
   ): Promise<InvalidationResult> {
+    const entities = entityIds.map((entityId) => ({
+      entityId,
+      indexKey: this.indexKeyFor(tenant, category, entityId),
+    }));
     const result: InvalidationResult = {
       entities: 0,
       membersObserved: 0,
       valuesUnlinked: 0,
       referencesRemoved: 0,
+      incomplete: [],
     };
-    const queue = [...entityIds];
-    const workerCount = Math.min(this.concurrency, Math.max(queue.length, 1));
+    let next = 0;
+    const workerCount = Math.min(this.concurrency, entities.length);
 
     const runWorker = async (): Promise<void> => {
       for (;;) {
-        const entityId = queue.shift();
-        if (entityId === undefined) return;
-        const one = await this.invalidateOne(tenant, category, entityId);
-        result.entities += 1;
-        result.membersObserved += one.membersObserved;
-        result.valuesUnlinked += one.valuesUnlinked;
-        result.referencesRemoved += one.referencesRemoved;
+        const entity = entities[next++];
+        if (entity === undefined) return;
+        try {
+          await this.invalidateOne(entity.indexKey, result);
+          result.entities += 1;
+        } catch (err) {
+          result.incomplete.push({
+            entityId: entity.entityId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     };
 
@@ -231,25 +284,18 @@ export class EntityIndex {
     return result;
   }
 
-  private async invalidateOne(
-    tenant: string,
-    category: string,
-    entityId: string,
-  ): Promise<{ membersObserved: number; valuesUnlinked: number; referencesRemoved: number }> {
-    const indexKey = this.indexKeyFor(tenant, category, entityId);
+  private async invalidateOne(indexKey: string, result: InvalidationResult): Promise<void> {
     const members = await this.redis.smembers(indexKey);
-
-    let valuesUnlinked = 0;
+    result.membersObserved += members.length;
     for (const batch of chunk(members, this.batchSize)) {
-      valuesUnlinked += await this.redis.unlink(...batch);
+      // Use a local reply before +=: concurrent workers must not overwrite another's update.
+      const removed = await this.redis.unlink(...batch);
+      result.valuesUnlinked += removed;
     }
-
-    let referencesRemoved = 0;
     for (const batch of chunk(members, this.batchSize)) {
-      referencesRemoved += await this.redis.srem(indexKey, ...batch);
+      const removed = await this.redis.srem(indexKey, ...batch);
+      result.referencesRemoved += removed;
     }
-
-    return { membersObserved: members.length, valuesUnlinked, referencesRemoved };
   }
 
   /**
@@ -258,30 +304,33 @@ export class EntityIndex {
    */
   async prune(tenant: string, category: string, entityId: string): Promise<PruneResult> {
     const indexKey = this.indexKeyFor(tenant, category, entityId);
-    const members = await this.redis.smembers(indexKey);
-    const missing: string[] = [];
-
-    for (const batch of chunk(members, this.batchSize)) {
-      const pipe = this.redis.pipeline();
-      for (const member of batch) pipe.exists(member);
-      const replies = await pipe.exec();
-      if (replies === null) {
-        throw new Error(`pipeline aborted while pruning ${indexKey}`);
-      }
-      replies.forEach(([err, reply], i) => {
-        if (err) throw err;
-        if (reply === 0) {
-          const member = batch[i];
-          if (member !== undefined) missing.push(member);
-        }
-      });
-    }
-
+    let cursor = "0";
+    let membersChecked = 0;
     let membersRemoved = 0;
-    for (const batch of chunk(missing, this.batchSize)) {
-      membersRemoved += await this.redis.srem(indexKey, ...batch);
-    }
-    return { indexKey, membersChecked: members.length, membersRemoved };
+    do {
+      // COUNT is a hint, not a hard limit; chunk each page before EXISTS/SREM.
+      const [nextCursor, members] = await this.redis.sscan(indexKey, cursor, "COUNT", this.batchSize);
+      cursor = nextCursor;
+      for (const batch of chunk(members, this.batchSize)) {
+        const pipe = this.redis.pipeline();
+        for (const member of batch) pipe.exists(member);
+        const replies = await pipe.exec();
+        if (replies === null || replies.length !== batch.length) {
+          throw new Error(`incomplete EXISTS pipeline while pruning ${indexKey}`);
+        }
+        const missing: string[] = [];
+        replies.forEach(([err, reply], i) => {
+          if (err) throw err;
+          if (reply === 0) {
+            const member = batch[i];
+            if (member !== undefined) missing.push(member);
+          }
+        });
+        membersChecked += batch.length;
+        if (missing.length > 0) membersRemoved += await this.redis.srem(indexKey, ...missing);
+      }
+    } while (cursor !== "0");
+    return { indexKey, membersChecked, membersRemoved };
   }
 }
 

@@ -56,8 +56,17 @@ graph makes its point within seconds either way.
 
 ```jsonc
 { "jobId":"job_a1b2c3", "mode":"v1", "state":"running",   // running | stopped | done | failed
-  "total":1000, "processed":37, "removed":74, "startedAt":"…", "finishedAt":null }
+  "total":1000, "processed":37, "removed":74, "startedAt":"…", "finishedAt":null,
+  "incomplete":[] }
 ```
+
+Jobs attempt all requested users unless stopped. `processed` counts attempted users, including
+failures; `incomplete` lists `{entityId,error}` for each failed attempt. Completed jobs with any
+failures have `state:"failed"` and an `error` summary. Other users still finish.
+Retry only failed IDs by posting `{userIds: job.incomplete.map(entry => entry.entityId)}` to the
+same invalidation endpoint after resolving the error. A stopped job also has unattempted users:
+resume the original list from offset `processed` once the in-flight user has finished
+(`finishedAt` is non-null).
 
 ### `POST /jobs/:jobId/stop` → `{ "jobId":"…", "state":"stopped" }`
 
