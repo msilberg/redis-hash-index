@@ -98,7 +98,9 @@ test("v1 and v2 remove every cache key for their disjoint user groups", async ()
 
   const startV2 = await post("/v2/invalidate", { userIds: groupV2 });
   assert.equal(startV2.status, 202);
-  const v2Body = (await startV2.json()) as { jobId: string };
+  const v2Body = (await startV2.json()) as { jobId: string; mode: string; total: number };
+  assert.equal(v2Body.mode, "v2");
+  assert.equal(v2Body.total, 40);
 
   const v1Job = await pollUntilTerminal(v1Body.jobId);
   const v2Job = await pollUntilTerminal(v2Body.jobId);
@@ -140,9 +142,11 @@ test("POST /jobs/:id/stop aborts a running job between users", async () => {
 });
 
 test("bad request bodies are rejected with 400", async () => {
-  assert.equal((await post("/v1/invalidate", {})).status, 400);
-  assert.equal((await post("/v1/invalidate", { userIds: [] })).status, 400);
-  assert.equal((await post("/v2/invalidate", { userIds: ["nope"] })).status, 400);
+  for (const mode of ["v1", "v2"]) {
+    assert.equal((await post(`/${mode}/invalidate`, {})).status, 400);
+    assert.equal((await post(`/${mode}/invalidate`, { userIds: [] })).status, 400);
+    assert.equal((await post(`/${mode}/invalidate`, { userIds: ["nope"] })).status, 400);
+  }
 });
 
 test("GET /jobs/:id and stop return 404 for an unknown job", async () => {
