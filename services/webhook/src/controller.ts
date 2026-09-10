@@ -10,14 +10,18 @@
 // Both endpoints return 202 immediately with {jobId,mode,total}; the work runs in the background
 // and is observable through GET /jobs/:id. A 1,000-user v1 batch is not meant to finish.
 
+import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
 import type { Request, Response } from "express";
 import { randomBytes } from "node:crypto";
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
 import { BATCH_SIZE, CATEGORY, TENANT } from "./config";
 
 const USER_ID_RE = /^u_\d{7}$/;
 
-export type JobMode = "v1" | "v2";
+export enum JobMode {
+  V1 = "v1",
+  V2 = "v2",
+};
+
 export type JobState = "running" | "stopped" | "done" | "failed";
 
 export interface Job {
@@ -54,7 +58,7 @@ export class WebhookController {
   startJobV1 = (req: Request, res: Response): void => {
     const userIds = this.readUserIds(req, res);
     if (userIds === null) return;
-    const job = this.createJob("v1", userIds);
+    const job = this.createJob(JobMode.V1, userIds);
     // The background worker owns its error handling.
     void this.runJob(job, userIds);
     res.status(202).json({ jobId: job.jobId, mode: job.mode, total: job.total });
@@ -63,7 +67,7 @@ export class WebhookController {
   startJobV2 = (req: Request, res: Response): void => {
     const userIds = this.readUserIds(req, res);
     if (userIds === null) return;
-    const job = this.createJob("v2", userIds);
+    const job = this.createJob(JobMode.V2, userIds);
     // The background worker owns its error handling.
     void this.runJob(job, userIds);
     res.status(202).json({ jobId: job.jobId, mode: job.mode, total: job.total });
@@ -121,7 +125,7 @@ export class WebhookController {
       for (const userId of userIds) {
         if (job.state === "stopped") break;
         const removed =
-          job.mode === "v1"
+          job.mode === JobMode.V1
             ? await this.invalidateLegacy(userId)
             : (await this.index.invalidateEntities(TENANT, CATEGORY, [userId])).valuesUnlinked;
         job.processed += 1;
