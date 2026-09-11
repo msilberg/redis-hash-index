@@ -153,3 +153,30 @@ test("GET /jobs/:id and stop return 404 for an unknown job", async () => {
   assert.equal((await fetch(`${baseUrl}/jobs/job_missing`)).status, 404);
   assert.equal((await post("/jobs/job_missing/stop")).status, 404);
 });
+
+test("v2 reports failed entity IDs, finishes healthy users, and accepts a targeted retry", async () => {
+  const broken = userId(9001);
+  const healthy = userId(9002);
+  await redis.set(indexKey(broken), "wrong type");
+  await seedUser(healthy, 2);
+  const start = await post("/v2/invalidate", { userIds: [broken, healthy] });
+  assert.equal(start.status, 202);
+  const { jobId } = (await start.json()) as { jobId: string };
+  const job = await pollUntilTerminal(jobId);
+  assert.equal(job.state, "failed");
+  assert.equal(job.processed, 2);
+  assert.equal(job.removed, 2);
+  assert.equal(job.incomplete.length, 1);
+  assert.equal(job.incomplete[0]?.entityId, broken);
+  assert.match(job.incomplete[0]?.error ?? "", /WRONGTYPE/);
+  assert.equal(await redis.exists(indexKey(healthy)), 0);
+
+  await redis.del(indexKey(broken));
+  await seedUser(broken, 1);
+  const retry = await post("/v2/invalidate", { userIds: job.incomplete.map((f) => f.entityId) });
+  const retryBody = (await retry.json()) as { jobId: string };
+  const retried = await pollUntilTerminal(retryBody.jobId);
+  assert.equal(retried.state, "done");
+  assert.equal(retried.removed, 1);
+  assert.deepEqual(retried.incomplete, []);
+});

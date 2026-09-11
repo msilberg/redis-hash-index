@@ -15,7 +15,6 @@ import { expectedTotals } from "./fixture";
 import {
   AlreadySeedingError,
   Seeder,
-  type SeederPipeline,
   type SeederRedis,
   type SeedMarker,
   type SeedState,
@@ -175,28 +174,28 @@ test("start() refuses a concurrent seed", async () => {
   await once(seeder, "done");
 });
 
-test("a pipeline error reply aborts seeding and sets state failed", async () => {
-  const failing: SeederRedis = {
-    pipeline(): SeederPipeline {
-      const p: SeederPipeline = {
-        set: () => p,
-        sadd: () => p,
-        expire: () => p,
-        exec: async () => [[new Error("boom"), null]],
+test("a shared registration transaction error fails seeding without publishing a marker", async () => {
+  const failing = new Proxy(redis, {
+    get(target, prop) {
+      if (prop === "flushdb") return async () => {
+        await target.flushdb();
+        // A real runtime SADD error inside registerMany's MULTI.
+        await target.set("entityIndex::demo::activeSubscription::u_0000000", "wrong type");
+        return "OK";
       };
-      return p;
+      const value = Reflect.get(target, prop);
+      return typeof value === "function" ? value.bind(target) : value;
     },
-    dbsize: async () => 0,
-    get: async () => null,
-    set: async () => "OK",
-    flushdb: async () => "OK",
-    info: async () => "used_memory_human:1.00M",
-  };
-  const seeder = new Seeder(failing, index, { seedKeys: 10, seedValue: 1, pipelineSize: 20_000 });
+  });
+  const seeder = new Seeder(failing as unknown as SeederRedis, index, {
+    seedKeys: 10, seedValue: 1, pipelineSize: 20_000,
+  });
+  const failed = once(seeder, "failed");
   seeder.start();
-  const [message] = (await once(seeder, "failed")) as [string];
-  assert.match(message, /boom/);
+  const [message] = (await failed) as [string];
+  assert.match(message, /WRONGTYPE/);
   assert.equal((await seeder.status()).state, "failed");
+  assert.equal(await redis.get(MARKER_KEY), null);
 });
 
 test("HTTP: POST /api/seed is 202, a second is 409, status then reports ready", async () => {
