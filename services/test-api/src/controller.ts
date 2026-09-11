@@ -5,8 +5,8 @@
 // It reads via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
 // route. See docs/REDIS-SCHEMA.md.
 
-import type { Request, Response } from "express";
 import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import type { Request, Response } from "express";
 import { CATEGORY, TENANT } from "./config";
 
 const USER_ID_RE = /^u_\d{7}$/;
@@ -28,7 +28,7 @@ export class TestApiController {
     res.json({ ok: true });
   };
 
-  getEntitlement = (req: Request, res: Response): void => {
+  getUserSubscription = (req: Request, res: Response): void => {
     const userId = req.params.userId;
     if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
       res.status(400).json({ error: "userId must match ^u_\\d{7}$" });
@@ -36,7 +36,7 @@ export class TestApiController {
     }
 
     const indexKey = this.index.indexKeyFor(TENANT, CATEGORY, userId);
-    void this.readEntitlement(indexKey)
+    void this.readUserSubscription(indexKey)
       .then((body) => {
         res.json({ userId, ...body });
       })
@@ -53,7 +53,7 @@ export class TestApiController {
    * `hit: false` with `variants: 0` after a user has been invalidated is the correct answer — it is
    * never treated as an error and there is no scan fallback.
    */
-  private async readEntitlement(
+  private async readUserSubscription(
     indexKey: string,
   ): Promise<{ hit: boolean; variants: number; latencyMs: number }> {
     const started = process.hrtime.bigint();

@@ -9,7 +9,7 @@ export function createApp(redis: RedisReader): Express {
   app.disable("x-powered-by");
 
   app.get("/health", controller.health);
-  app.get("/entitlement/:userId", controller.getEntitlement);
+  app.get("/subscription/:userId", controller.getUserSubscription);
 
   return app;
 }
