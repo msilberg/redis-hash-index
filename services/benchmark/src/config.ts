@@ -1,20 +1,8 @@
-// Static pieces of the Redis schema this service is pinned to. `demo` is the only tenant and
-// `activeSubscription` the only indexed category — see docs/REDIS-SCHEMA.md.
-export const TENANT = "demo";
-export const CATEGORY = "activeSubscription";
-
-// The `service` segment of a cache key names *who wrote the record*. In this demo that is always
-// `test-api` (the reader owns the record shape); the benchmark only seeds on its behalf.
-export const SERVICE = "test-api";
+// The schema constants live with the fixture generator in packages/fixture; re-exported for this service.
+export { CATEGORY, SERVICE, TENANT } from "@redis-hash-index/fixture";
 
 // Every cache string and every index set is armed with this TTL — see docs/REDIS-SCHEMA.md.
 export const CACHE_TTL_SECONDS = 3600;
-
-// Plan ids are cycled deterministically over this list, one step per cache record.
-export const PLAN_IDS = ["pro-monthly", "pro-yearly", "team-monthly", "gen-ai-100k"] as const;
-
-// SEED_KEYS is a count of cache *records*; user count is derived so users * averageVariants ≈ SEED_KEYS.
-export const AVERAGE_VARIANTS = 2;
 
 // The marker key. Its presence means a completed seed survived a restart; `POST /api/seed/reset`
 // flushes the db and clears it.

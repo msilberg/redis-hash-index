@@ -6,7 +6,7 @@ convenience; services address each other by container name.
 | Service | Container | Host port | Redis access |
 |---|---|---|---|
 | benchmark | `benchmark` | 3000 | read/write (seeding) |
-| test-api | `test-api` | 3001 | read only |
+| test-api | `test-api` | 3001 | read; fills through `@Cache` on `/subscription` |
 | webhook | `webhook` | 3002 | read + delete |
 | redis | `redis` | 6379 | — |
 
@@ -32,6 +32,40 @@ server this service is genuinely queued behind it rather than sharing a busy cli
 
 Reads via the index (`SMEMBERS` then `MGET`). Never scans. `hit: false` with `variants: 0` after
 the user has been invalidated — that is the expected post-eviction state, not an error.
+
+### `GET /subscription/:userId?includeAddons=true&v=1` — the read path
+
+A read-through fill in front of the fake billing origin. The route calls the `@Cache`-decorated
+`SubscriptionService.getActiveSubscription(userId, params)`; the decorator reads the cache, calls the
+origin only on a miss, and writes value and index reference in one `MULTI`. The route never builds a
+key.
+
+```jsonc
+// 200
+{
+  "userId": "u_0000001",
+  "source": "origin",        // "cache" | "origin" — whether THIS request called the origin
+  "variants": 2,             // live cached variants for the user after the read (SMEMBERS + MGET)
+  "latencyMs": 4.76,         // Redis only: the decorated call minus origin time, plus the variant read
+  "originMs": 0.29,          // present only when source is "origin"
+  "subscription": { "userId":"u_0000001", "planId":"team-monthly", "status":"active",
+                    "renewsAt":"2026-11-15", "seats":2 }   // null if the user has no such variant
+}
+// 400 — userId not ^u_\d{7}$, v not a positive integer, includeAddons not true|false
+// 502 { "error": "…" } — the origin threw
+```
+
+Query parameters become the key's `params` segment as canonical JSON: `?includeAddons=true` is
+`{"includeAddons":true}`, `?v=1` is the seeded fixture record `{"v":1}` (a cache hit right after
+seeding), no query is `{}`. Other query parameters are ignored and never reach the key.
+
+**A 502 writes nothing to Redis** — no value and no index member — and the next call reaches the
+origin again. A `null` subscription is not cached either. The origin is the deterministic mock
+`BillingProvider` (`SEED_VALUE`, `ORIGIN_LATENCY_MS`, `ORIGIN_FAIL_USER`), so a filled record is
+byte-identical to the seeded one.
+
+A request that joins another request's in-flight fill for the same key (single-flight) does not call
+the origin itself and reports `source: "cache"`, although its `latencyMs` includes that wait.
 
 ### `GET /health` → `{"ok":true}`
 

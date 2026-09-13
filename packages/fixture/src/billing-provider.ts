@@ -19,6 +19,8 @@ export interface Subscription {
 /** Call parameters; they become the `params` segment of the cache key. `v` selects the variant. */
 export interface SubscriptionParams {
   v?: number;
+  /** Carried into the key only — the mock returns the same record either way. */
+  includeAddons?: boolean;
 }
 
 export interface BillingProviderConfig {

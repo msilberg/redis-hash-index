@@ -8,7 +8,7 @@
                     ┌──────▼───────┐            ┌──────────────┐
                     │   test-api   │ :3001      │   webhook    │ :3002
                     └──────┬───────┘            └──────┬───────┘
-                           │ read                      │ delete
+                           │ read · fill               │ delete
                            └─────────┬─────────────────┘
                                      ▼
                               ┌─────────────┐
@@ -88,7 +88,8 @@ method looks up its strategy when it is called. Calling one before configuration
 cache is never silently bypassed. These are standard TypeScript 5 decorators: no
 `experimentalDecorators`, no `reflect-metadata`.
 
-**Where the demo uses it.** The benchmark's `SubscriptionService` decorates a call to a
+**Where the demo uses it.** `SubscriptionService` (in `packages/fixture`, shared by benchmark and
+`test-api`) decorates a call to a
 deterministic mock `BillingProvider`. For a given user and variant, the provider returns exactly
 the record the fixture generator writes, and it never touches Redis. The fixture can be filled two
 ways:
@@ -102,6 +103,51 @@ In both modes, the first `LAZY_WARM_USERS` users are filled through the decorato
 `lazy-warm` phase. Those users are the eviction batch, so the default run evicts records written
 by `@Cache`. The two modes produce the same `DBSIZE` and byte-identical values for a given
 `SEED_VALUE`, and a test asserts it.
+
+## Read path
+
+`test-api`'s `GET /subscription/:userId` is the demo's cache *fill*. It calls the same decorated
+`SubscriptionService` the seeder uses, over the same mock `BillingProvider`:
+
+```ts
+class SubscriptionService {
+  @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE)
+  async getActiveSubscription(userId: string, params: SubscriptionParams = {}) {
+    return await this.billing.getActiveSubscription(userId, params);
+  }
+}
+```
+
+**What the decorator hides.** The call site names no key and touches no Redis. The key —
+`test-api::demo::activeSubscription::u_0000001::{"includeAddons":true}` — is built from the
+arguments, and the `params` tail grows a new variant for every new combination of call options.
+Nobody writes that key down, so it is trivially easy to *create*. It is hard to *delete from*: the
+day someone hands you one user ID and says "invalidate this", the variants that exist are whatever
+the callers happened to pass. A pattern scan finds them at O(keyspace); the index finds them because
+every fill registered its key in the same `MULTI` that wrote the value.
+
+**The race it cannot close.** A fill reads the origin, then writes. An invalidation that lands in
+between deletes everything the index lists *at that moment* — and the fill, holding an origin answer
+from before the invalidation, writes it afterwards. The integration test
+`services/test-api/src/read-path.test.ts` reproduces that interleaving deterministically (the origin
+call is parked on a latch while the invalidation runs) and asserts:
+
+- the invalidation removed the values and references that existed when it ran;
+- the late fill then lands **both** its value and its index reference — the only keys left are that
+  value and its set, and the set names exactly that value (no orphan value, no dangling reference);
+- that value is armed with the full TTL, the reference's TTL is at least as long, and it is served
+  from the cache without another origin call — it survives until its TTL expires or the next
+  invalidation, which the test shows still finds and removes it through the index.
+
+A second test asserts that an invalidation after a *completed* fill removes value and reference, and
+the next read goes back to the origin. A third asserts that an origin error returns 502, writes no
+key and no index member, and that the next call still reaches the origin.
+
+**What that demonstrates is bounded staleness, not atomicity.** The value the late fill wrote may be
+older than the invalidation; the demo promises only that it is reachable through the index and gone
+by its TTL. The test does not wait out the hour — it asserts the TTL is armed and bounded. Closing
+the race properly needs generation numbers (an invalidation bumps a per-entity generation, and a fill
+that read under an older one refuses to write). This demo deliberately does not implement them.
 
 ## Registration and maintenance policy
 

@@ -1,4 +1,4 @@
-.PHONY: up down logs typecheck test seed reset verify
+.PHONY: up down logs typecheck test seed reset verify packages
 
 # Bring up the stack, wait for every container to report healthy, then seed the fixture.
 # Seeding is a no-op if the fixture is already present — `make reset` first, or `make seed FORCE=1`,
@@ -16,10 +16,10 @@ down:
 logs:
 	docker compose logs -f --tail=100
 
-typecheck: node_modules
+typecheck: packages
 	npm run typecheck --workspaces --if-present
 
-test: node_modules
+test: packages
 	docker compose up -d redis
 	@timeout 30 sh -c 'until docker compose exec -T redis redis-cli ping 2>/dev/null | grep -q PONG; do sleep 1; done'
 	npm run test --workspaces --if-present
@@ -37,3 +37,8 @@ verify:
 node_modules: package.json
 	npm install
 	@touch node_modules
+
+# Services typecheck and run against the shared packages' compiled dist/. Build them in dependency
+# order every time: npm runs workspace `prepare` scripts in parallel, so fixture cannot rely on one.
+packages: node_modules
+	npm run build --workspace @redis-hash-index/cache --workspace @redis-hash-index/fixture

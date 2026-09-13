@@ -1,4 +1,5 @@
 import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import { BillingProvider } from "@redis-hash-index/fixture";
 import Redis from "ioredis";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -19,7 +20,7 @@ let baseUrl: string;
 
 before(async () => {
   await redis.flushdb();
-  const app = createApp(redis as unknown as RedisReader);
+  const app = createApp(redis as unknown as RedisReader, new BillingProvider({ seedValue: 1, latencyMs: 0 }));
   await new Promise<void>((resolve) => {
     server = app.listen(0, resolve);
   });
@@ -55,9 +56,9 @@ test("GET /health returns {ok:true}", async () => {
   assert.deepEqual(await res.json(), { ok: true });
 });
 
-test("GET /subscription/:userId reports a hit, the variant count and a latency", async () => {
+test("GET /entitlement/:userId reports a hit, the variant count and a latency", async () => {
   await seedUser("u_0000001", 2);
-  const res = await fetch(`${baseUrl}/subscription/u_0000001`);
+  const res = await fetch(`${baseUrl}/entitlement/u_0000001`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.userId, "u_0000001");
@@ -67,15 +68,22 @@ test("GET /subscription/:userId reports a hit, the variant count and a latency",
   assert.ok((body.latencyMs as number) >= 0);
 });
 
-test("GET /subscription/:userId returns hit:false, variants:0 for an unseeded user", async () => {
-  const res = await fetch(`${baseUrl}/subscription/u_9999999`);
+test("GET /entitlement/:userId returns hit:false, variants:0 for an unseeded user", async () => {
+  const res = await fetch(`${baseUrl}/entitlement/u_9999999`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.hit, false);
   assert.equal(body.variants, 0);
 });
 
-test("GET /subscription/:userId rejects a malformed id with 400", async () => {
-  const res = await fetch(`${baseUrl}/subscription/bogus`);
+test("GET /entitlement/:userId rejects a malformed id with 400", async () => {
+  const res = await fetch(`${baseUrl}/entitlement/bogus`);
   assert.equal(res.status, 400);
+});
+
+test("GET /subscription/:userId rejects a malformed id or query with 400 before touching the cache", async () => {
+  for (const path of ["/subscription/bogus", "/subscription/u_0000001?v=0", "/subscription/u_0000001?includeAddons=yes"]) {
+    const res = await fetch(`${baseUrl}${path}`);
+    assert.equal(res.status, 400, path);
+  }
 });

@@ -51,8 +51,9 @@ never `await` it in the handler.
   first, and build the provider with the SAME `seedValue` as the seeder or lazy-warm values diverge.
 - `BillingProvider` throws `OriginError` for origin failures; the seeder tolerates only that class
   (skips the record, shrinks expected totals) and aborts on anything else (Redis errors).
-- `billing-provider.test.ts` is pure (no DB). `fixture.recordsFor` / `recordOrdinalFor` are the
-  per-user generator both the bulk writer and the provider use — plan IDs depend on record position.
+- The fixture generator, `BillingProvider` and `SubscriptionService` live in `packages/fixture`
+  (shared with test-api). `fixture.recordsFor` / `recordOrdinalFor` are the per-user generator both
+  the bulk writer and the provider use — plan IDs depend on record position.
 - A `before`/`beforeEach` hook that `await once(seeder, "done")` hangs forever if the seed emits
   `failed` — race the two events and reject on `failed`.
 - The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,
@@ -67,6 +68,16 @@ never `await` it in the handler.
 - Test gotcha: Node's global `fetch` (undici) keeps sockets alive, so `server.close()` hangs —
   call `server.closeAllConnections()` first. And a fast seed can emit `done` before an
   `once(seeder,"done")` listener attaches; poll `seeder.status()` instead of racing the event.
+
+## test-api
+
+- `createApp(redis, origin)`: `/entitlement` is the SMEMBERS+MGET bystander the run driver and
+  `make verify` poll; `/subscription` is the `@Cache` read-through. Don't merge or rename them.
+- The controller builds `new SubscriptionService(probe)` per request, the probe wrapping the shared
+  origin — that is how a request learns `source`/`originMs`. The decorator's single-flight map is per
+  decorated method, not per instance, so this does not defeat it.
+- `app.test.ts` owns DB 15, `read-path.test.ts` DB 14 and calls `configureCache` itself. The
+  interleaving test parks the origin on a latch (`GatedOrigin.hold()`) — order, not sleeps.
 
 ## Tests
 

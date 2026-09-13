@@ -104,7 +104,8 @@ keys and values, and nothing large lives in git.
 
 ### Seeding environment
 
-Set these in the shell before `make up` (compose forwards them to `benchmark`). `SEED_MODE` and
+Set these in the shell before `make up` (compose forwards them to `benchmark`; `SEED_VALUE` and the
+two `ORIGIN_*` variables also reach `test-api`, whose `/subscription` route uses the same mock origin). `SEED_MODE` and
 `SEED_KEYS` set before `make seed` also override the running container for that one seed.
 
 | Variable | Default | What it does |
@@ -154,6 +155,10 @@ scan.
 - The seeder uses the shared transactional `registerMany()` writer. Pruning is available but
   not scheduled; fixture index sets expire after one hour. See the
   [registration and maintenance policy](docs/ARCHITECTURE.md#registration-and-maintenance-policy).
+- The demo fills the cache as well as evicting it: `test-api`'s `GET /subscription/:userId` is a
+  read-through through `@Cache`. Its origin is fake and deterministic (the mock `BillingProvider`),
+  and a fill racing an invalidation gives bounded staleness, not atomicity — see
+  [read path](docs/ARCHITECTURE.md#read-path).
 - Webhook v2 deliberately processes one entity at a time for precise progress and Stop behavior.
   Failed IDs are reported in `incomplete` for targeted retries; see [the job API](docs/API.md).
 

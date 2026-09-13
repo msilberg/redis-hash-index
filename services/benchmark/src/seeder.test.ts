@@ -7,12 +7,17 @@ import { after, before, beforeEach, test } from "node:test";
 import Redis from "ioredis";
 import { WebSocket } from "ws";
 import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import {
+  BillingProvider,
+  expectedTotals,
+  generateUsers,
+  SubscriptionService,
+  type SubscriptionParams,
+} from "@redis-hash-index/fixture";
 
 import { createApp } from "./app";
-import { BillingProvider, type SubscriptionParams } from "./billing-provider";
 import { CATEGORY, MARKER_KEY, SERVICE, TENANT, type SeedMode } from "./config";
 import { Runner } from "./runner";
-import { expectedTotals, generateUsers } from "./fixture";
 import {
   AlreadySeedingError,
   Seeder,
@@ -23,7 +28,6 @@ import {
   type SeedProgressFrame,
   type SeedState,
 } from "./seeder";
-import { SubscriptionService } from "./subscription-service";
 import { attachWebSocket } from "./ws";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";

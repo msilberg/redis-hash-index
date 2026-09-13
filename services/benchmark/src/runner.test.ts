@@ -6,17 +6,15 @@ import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
 import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import { BillingProvider, SubscriptionService, userIdFor } from "@redis-hash-index/fixture";
 import express, { type Express } from "express";
 import Redis from "ioredis";
 import { WebSocket } from "ws";
 
 import { createApp } from "./app";
-import { BillingProvider } from "./billing-provider";
 import { CATEGORY, SERVICE, TENANT } from "./config";
-import { userIdFor } from "./fixture";
 import { RunInProgressError, Runner, type RunnerConfig } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
-import { SubscriptionService } from "./subscription-service";
 import { attachWebSocket } from "./ws";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
@@ -88,7 +86,7 @@ const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 /** A stand-in for test-api: reads the index exactly the way the real one does (SMEMBERS then MGET). */
 function fakeTestApi(): Express {
   const app = express();
-  app.get("/subscription/:userId", (req, res) => {
+  app.get("/entitlement/:userId", (req, res) => {
     const userId = req.params.userId;
     const key = index.indexKeyFor(TENANT, CATEGORY, userId);
     void (async () => {

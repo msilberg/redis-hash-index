@@ -5,6 +5,7 @@
   "license": "GPL-3.0",
   "workspaces": [
     "packages/cache",
+    "packages/fixture",
     "services/test-api",
     "services/webhook",
     "services/benchmark"

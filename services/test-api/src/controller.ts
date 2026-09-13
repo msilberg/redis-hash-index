@@ -4,23 +4,40 @@
 //
 // It reads via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
 // route. See docs/REDIS-SCHEMA.md.
+//
+// `GET /subscription/:userId` is the read path (US-009): a read-through fill in front of the fake
+// billing origin, done entirely by the `@Cache` decorator on `SubscriptionService`. This controller
+// never builds a cache key for it.
 
 import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import {
+  CATEGORY,
+  SubscriptionService,
+  TENANT,
+  type Subscription,
+  type SubscriptionOrigin,
+  type SubscriptionParams,
+} from "@redis-hash-index/fixture";
 import type { Request, Response } from "express";
-import { CATEGORY, TENANT } from "./config";
 
 const USER_ID_RE = /^u_\d{7}$/;
+const VARIANT_RE = /^[1-9]\d{0,2}$/;
 
-/** The slice of a Redis client this service touches. It only ever reads. */
+/** The slice of a Redis client this service touches directly. Fills go through `@Cache`. */
 export interface RedisReader {
   smembers(key: string): Promise<string[]>;
   mget(...keys: string[]): Promise<Array<string | null>>;
 }
 
+const elapsedMs = (started: bigint): number => Number(process.hrtime.bigint() - started) / 1e6;
+
 export class TestApiController {
   private readonly index: EntityIndexCacheStrategy;
 
-  constructor(private readonly redis: RedisReader) {
+  constructor(
+    private readonly redis: RedisReader,
+    private readonly origin: SubscriptionOrigin,
+  ) {
     this.index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
   }
 
@@ -28,21 +45,42 @@ export class TestApiController {
     res.json({ ok: true });
   };
 
-  getUserSubscription = (req: Request, res: Response): void => {
+  getEntitlement = (req: Request, res: Response): void => {
     const userId = req.params.userId;
     if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
       res.status(400).json({ error: "userId must match ^u_\\d{7}$" });
       return;
     }
 
-    const indexKey = this.index.indexKeyFor(TENANT, CATEGORY, userId);
-    void this.readUserSubscription(indexKey)
+    void this.readEntitlement(userId)
       .then((body) => {
         res.json({ userId, ...body });
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         res.status(502).json({ error: `redis read failed: ${message}` });
+      });
+  };
+
+  getSubscription = (req: Request, res: Response): void => {
+    const userId = req.params.userId;
+    if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
+      res.status(400).json({ error: "userId must match ^u_\\d{7}$" });
+      return;
+    }
+    const params = subscriptionParams(req.query);
+    if (typeof params === "string") {
+      res.status(400).json({ error: params });
+      return;
+    }
+
+    void this.readSubscription(userId, params)
+      .then((body) => {
+        res.json(body);
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        res.status(502).json({ error: `subscription read failed: ${message}` });
       });
   };
 
@@ -53,17 +91,74 @@ export class TestApiController {
    * `hit: false` with `variants: 0` after a user has been invalidated is the correct answer — it is
    * never treated as an error and there is no scan fallback.
    */
-  private async readUserSubscription(
-    indexKey: string,
+  private async readEntitlement(
+    userId: string,
   ): Promise<{ hit: boolean; variants: number; latencyMs: number }> {
+    const indexKey = this.index.indexKeyFor(TENANT, CATEGORY, userId);
     const started = process.hrtime.bigint();
     const members = await this.redis.smembers(indexKey);
     const values = members.length > 0 ? await this.redis.mget(...members) : [];
-    const latencyMs = Number(process.hrtime.bigint() - started) / 1e6;
+    const latencyMs = elapsedMs(started);
+    const variants = values.filter((value) => Boolean(value)).length;
+    return { hit: variants > 0, variants, latencyMs };
+  }
+
+  /**
+   * One read-through: the decorated call, then the entitlement read for the variant count.
+   *
+   * The service is built per request over a probe around the shared origin, so this request can tell
+   * whether it reached the origin and for how long — the decorator itself reports neither.
+   * `latencyMs` is the decorated call's wall time minus origin time, plus the entitlement read. A
+   * request that joins another request's in-flight fill (single-flight) never calls the origin, so
+   * it reports `source: "cache"` although it waited on that fill.
+   */
+  private async readSubscription(userId: string, params: SubscriptionParams): Promise<Record<string, unknown>> {
+    let originMs: number | undefined;
+    const probe: SubscriptionOrigin = {
+      getActiveSubscription: async (id, p) => {
+        const started = process.hrtime.bigint();
+        try {
+          return await this.origin.getActiveSubscription(id, p);
+        } finally {
+          originMs = elapsedMs(started);
+        }
+      },
+    };
+
+    const started = process.hrtime.bigint();
+    const subscription: Subscription | null = await new SubscriptionService(probe).getActiveSubscription(
+      userId,
+      params,
+    );
+    const fillMs = elapsedMs(started) - (originMs ?? 0);
+    const entitlement = await this.readEntitlement(userId);
+
     return {
-      hit: values.some((value) => Boolean(value)),
-      variants: values.filter((value) => Boolean(value)).length,
-      latencyMs,
+      userId,
+      source: originMs === undefined ? "cache" : "origin",
+      variants: entitlement.variants,
+      latencyMs: fillMs + entitlement.latencyMs,
+      ...(originMs === undefined ? {} : { originMs }),
+      subscription,
     };
   }
+}
+
+/**
+ * The query string becomes the decorator's `params` segment, so accept only what the origin
+ * understands: `v` (variant) and `includeAddons`. Anything else is ignored and never reaches the key.
+ * Returns an error message for a malformed value.
+ */
+function subscriptionParams(query: Request["query"]): SubscriptionParams | string {
+  const params: SubscriptionParams = {};
+  const { v, includeAddons } = query;
+  if (v !== undefined) {
+    if (typeof v !== "string" || !VARIANT_RE.test(v)) return "v must be a positive integer";
+    params.v = Number(v);
+  }
+  if (includeAddons !== undefined) {
+    if (includeAddons !== "true" && includeAddons !== "false") return "includeAddons must be true or false";
+    params.includeAddons = includeAddons === "true";
+  }
+  return params;
 }

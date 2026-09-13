@@ -10,7 +10,7 @@ import {
   PLAN_IDS,
   SERVICE,
   TENANT,
-} from "./config";
+} from "./schema";
 import { hashInt } from "./prng";
 
 export interface UserFixture {

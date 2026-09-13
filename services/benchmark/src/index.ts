@@ -2,13 +2,12 @@ import { createServer } from "node:http";
 
 import Redis from "ioredis";
 import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import { BillingProvider, SubscriptionService } from "@redis-hash-index/fixture";
 
 import { createApp } from "./app";
-import { BillingProvider } from "./billing-provider";
 import { CATEGORY, loadConfig, SERVICE, TENANT } from "./config";
 import { Runner } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
-import { SubscriptionService } from "./subscription-service";
 import { attachWebSocket } from "./ws";
 
 async function main(): Promise<void> {

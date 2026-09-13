@@ -1,21 +1,18 @@
 {
-  "name": "@redis-hash-index/test-api",
-  "version": "0.0.0",
+  "name": "@redis-hash-index/fixture",
+  "version": "0.0.1",
   "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "start": "node dist/index.js",
     "test": "node --import tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
-    "@redis-hash-index/cache": "*",
-    "@redis-hash-index/fixture": "*",
-    "express": "^4.21.1",
-    "ioredis": "^5.4.1"
+    "@redis-hash-index/cache": "*"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^22.9.0",
     "tsx": "^4.19.2"
   }

@@ -10,10 +10,17 @@
 import { EventEmitter } from "node:events";
 
 import type { EntityIndexCacheStrategy, Registration } from "@redis-hash-index/cache";
+import {
+  expectedTotals,
+  generateUsers,
+  OriginError,
+  userCount,
+  userIdFor,
+  variantsFor,
+  type ExpectedTotals,
+} from "@redis-hash-index/fixture";
 
-import { OriginError } from "./billing-provider";
 import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT, type SeedMode } from "./config";
-import { expectedTotals, generateUsers, userCount, userIdFor, variantsFor, type ExpectedTotals } from "./fixture";
 
 export type SeedState = "idle" | "seeding" | "ready" | "failed";
 
