@@ -18,6 +18,7 @@ succeeded rather than assuming it did.
 | [US-006](US-006.md) | benchmark — run driver |
 | [US-007](US-007.md) | benchmark — live UI |
 | [US-008](US-008.md) | End-to-end verification and README |
+| [US-009](US-009.md) | test-api read path — read-through cache, fake origin, interleaving test |
 
 ## Working rules for every story
 
