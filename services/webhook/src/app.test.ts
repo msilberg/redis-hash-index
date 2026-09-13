@@ -3,14 +3,14 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 import Redis from "ioredis";
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 import { createApp, type Job, type WebhookRedis } from "./app";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const TEST_DB = 15;
 
 const redis = new Redis(REDIS_URL, { db: TEST_DB });
-const index = new EntityIndex(redis as unknown as RedisClient, {
+const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, {
   categories: ["activeSubscription"],
 });
 

@@ -1,7 +1,23 @@
 # packages/cache
 
-The shared entity index. `test-api` reads through it, `webhook` invalidates through it. One module,
-imported twice — never re-implement key building or invalidation elsewhere.
+The shared cache strategies and the `@Cache` decorator. `test-api` reads through the entity index,
+`webhook` invalidates through it, `benchmark` fills through the decorator. Never re-implement key
+building or invalidation elsewhere.
+
+## Layout
+
+- `src/index.ts` is a barrel only. `src/redis.ts` = the narrow client interfaces; `src/keys.ts` =
+  segment/TTL validation + `chunk` (shared, import from here — not from a strategy);
+  `src/strategies/default.ts` → `strategies/entity-index.ts` (subclass); `src/cache-decorator.ts`.
+- Adding a Redis command to any strategy means adding it to `RedisClient` AND to the hand-built
+  stub clients in `index.test.ts` (they are typed `RedisClient`, so typecheck catches it).
+- `EntityIndexCacheStrategy.set` on an owned key must stay one `registerMany` MULTI — never
+  `super.set()` + register (reopens the write/registration race).
+- `@Cache` is a standard TS 5 decorator (esbuild/tsx and tsc both lower it). It resolves strategies
+  from a module-level registry at CALL time: every process (service bootstrap, each test file) must
+  call `configureCache(...)` first. `resetCacheConfiguration()` exists for tests.
+- The decorator's key is `service::tenant::category::<arg0>::<canonical JSON of arg1 or {}>`. For
+  the fixture's `{"v":N}` keys, call with `(userId, { v: N })`.
 
 ## Conventions
 
@@ -22,5 +38,6 @@ Keep `main`/`types` pointed at `dist/` — services `require()` the compiled JS 
 ## Tests
 
 Real Redis only (no mocks) — NX/GT expiry, MULTI-without-rollback and the SREM-vs-concurrent-writer
-cases don't reproduce otherwise. `make test` runs `docker compose up -d redis` first; tests use DB
-15 and `flushdb` between cases. Override the target with `REDIS_URL`.
+cases don't reproduce otherwise. `make test` runs `docker compose up -d redis` first;
+`index.test.ts` uses DB 15, `cache-decorator.test.ts` DB 14 (files run in parallel), both `flushdb`
+between cases. Override the target with `REDIS_URL`.

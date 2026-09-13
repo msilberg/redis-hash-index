@@ -49,6 +49,60 @@ hidden.
 The `latencyMs` figure is one sample per second from one client — enough to show a step change of
 four orders of magnitude, not a rigorous latency distribution. The README says so.
 
+## Cache strategies
+
+Services cache a method by annotating it. They never build a key:
+
+```ts
+@Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE)
+async getActiveSubscription(userId: string, params: SubscriptionParams = {}) { … }
+```
+
+The decorator builds `service::tenant::<CacheKey>::<first argument>::<canonical JSON of the rest>`.
+It sorts keys at every depth, so argument key order never splits one record into two. It reads
+through the strategy and calls the method only on a miss, then writes the result back through the
+strategy. Concurrent misses for the same key in one process share a single call. A rejection is
+never cached, and neither is `undefined`. `null` is cached only with `{ cacheNegative: true }`.
+Otherwise a five-second provider outage becomes an hour of cached "no subscription".
+
+`packages/cache` provides two strategies:
+
+- **`DefaultCacheStrategy`** owns the Redis client (`protected readonly`) and implements `get`
+  (`GET`) and `set` (`SET EX`, TTL validated before any command). It knows nothing about
+  indexes. Because the client lives in the base class, a subclass shares that connection instead of
+  opening a second one.
+- **`EntityIndexCacheStrategy extends DefaultCacheStrategy`** adds the entity index (`indexKeyFor`,
+  `parse`, `registerMany`, `invalidateEntities`, `prune`) and overrides `set`. A key in a category it
+  does not own goes to `super.set()`. A key it owns goes to
+  `registerMany([{ cacheKey, value, ttlSeconds }])`.
+
+That override *means* "write the value, then register it". It is not written as
+`super.set(); register();`, because that would take two round trips. An invalidation landing between
+them would miss the value, which would then survive to its TTL with no reference. `registerMany`
+queues `SET EX`, `SADD`, `EXPIRE NX` and `EXPIRE GT` in one `MULTI`, so a value never exists
+without its reference.
+
+Decorators are evaluated when the class is defined, before any connection exists. Each service
+calls `configureCache({ redis, service, tenant, categories })` once at bootstrap, and a decorated
+method looks up its strategy when it is called. Calling one before configuration throws; the
+cache is never silently bypassed. These are standard TypeScript 5 decorators: no
+`experimentalDecorators`, no `reflect-metadata`.
+
+**Where the demo uses it.** The benchmark's `SubscriptionService` decorates a call to a
+deterministic mock `BillingProvider`. For a given user and variant, the provider returns exactly
+the record the fixture generator writes, and it never touches Redis. The fixture can be filled two
+ways:
+
+- `SEED_MODE=bulk` (the default) pipelines ~20k commands per round trip. This is the only way
+  2,000,000 records land in about a minute.
+- `SEED_MODE=lazy` sends every record through the decorator: one `GET`, one origin call and one
+  `MULTI` each. It refuses to run above `LAZY_MAX_KEYS`.
+
+In both modes, the first `LAZY_WARM_USERS` users are filled through the decorator in a last
+`lazy-warm` phase. Those users are the eviction batch, so the default run evicts records written
+by `@Cache`. The two modes produce the same `DBSIZE` and byte-identical values for a given
+`SEED_VALUE`, and a test asserts it.
+
 ## Registration and maintenance policy
 
 The benchmark seeder is the demo's writer. It calls the shared package's

@@ -5,16 +5,18 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 import express, { type Express } from "express";
 import Redis from "ioredis";
 import { WebSocket } from "ws";
 
 import { createApp } from "./app";
-import { CATEGORY, TENANT } from "./config";
+import { BillingProvider } from "./billing-provider";
+import { CATEGORY, SERVICE, TENANT } from "./config";
 import { userIdFor } from "./fixture";
 import { RunInProgressError, Runner, type RunnerConfig } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
+import { SubscriptionService } from "./subscription-service";
 import { attachWebSocket } from "./ws";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
@@ -25,13 +27,24 @@ const SEED_KEYS = 50_000;
 const SEED_VALUE = 1;
 
 const redis = new Redis(REDIS_URL, { db: TEST_DB });
-const index = new EntityIndex(redis as unknown as RedisClient, { categories: [CATEGORY] });
+const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
 
-const seeder = new Seeder(redis as unknown as SeederRedis, index, {
-  seedKeys: SEED_KEYS,
-  seedValue: SEED_VALUE,
-  pipelineSize: 20_000,
-});
+configureCache({ redis: redis as unknown as RedisClient, service: SERVICE, tenant: TENANT, categories: [CATEGORY] });
+
+const seeder = new Seeder(
+  redis as unknown as SeederRedis,
+  index,
+  new SubscriptionService(new BillingProvider({ seedValue: SEED_VALUE, latencyMs: 0 })),
+  {
+    seedKeys: SEED_KEYS,
+    seedValue: SEED_VALUE,
+    pipelineSize: 20_000,
+    seedMode: "bulk",
+    lazyConcurrency: 16,
+    lazyMaxKeys: 50_000,
+    lazyWarmUsers: 1000,
+  },
+);
 
 function runnerConfig(over: Partial<RunnerConfig>): RunnerConfig {
   return {

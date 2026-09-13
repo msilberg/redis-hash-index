@@ -3,7 +3,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 
 import Redis from "ioredis";
 
-import { EntityIndex, INDEX_PREFIX, type RedisClient } from "./index";
+import { EntityIndexCacheStrategy, INDEX_PREFIX, type RedisClient } from "./index";
 
 // These tests need a real Redis — three of them only reproduce against real command semantics
 // (NX/GT expiry, MULTI without rollback, SREM vs a concurrent writer). `make test` brings up the
@@ -21,8 +21,8 @@ const cacheKey = (user: string, variant: number): string =>
 
 let redis: Redis;
 
-const newIndex = (client: RedisClient = redis as unknown as RedisClient): EntityIndex =>
-  new EntityIndex(client, { categories: [CATEGORY], batchSize: 500, concurrency: 4 });
+const newIndex = (client: RedisClient = redis as unknown as RedisClient): EntityIndexCacheStrategy =>
+  new EntityIndexCacheStrategy(client, { categories: [CATEGORY], batchSize: 500, concurrency: 4 });
 
 before(async () => {
   redis = new Redis(REDIS_URL, { db: TEST_DB, maxRetriesPerRequest: 1, lazyConnect: true });
@@ -135,6 +135,8 @@ describe("invalidateEntities", () => {
 
     let failed = false;
     const flaky: RedisClient = {
+      get: (k) => redis.get(k),
+      set: (k, v, mode, seconds) => redis.set(k, v, mode, seconds),
       smembers: (k) => redis.smembers(k),
       sscan: (k, cursor, count, size) => redis.sscan(k, cursor, count, size),
       srem: (k, ...m) => redis.srem(k, ...m),
@@ -146,7 +148,7 @@ describe("invalidateEntities", () => {
       },
     };
 
-    const result = await new EntityIndex(flaky, { categories: [CATEGORY] })
+    const result = await new EntityIndexCacheStrategy(flaky, { categories: [CATEGORY] })
       .invalidateEntities(TENANT, CATEGORY, [USER]);
     assert.equal(result.entities, 0);
     assert.deepEqual(result.incomplete, [{ entityId: USER, error: "injected UNLINK failure" }]);
@@ -171,6 +173,8 @@ describe("invalidateEntities", () => {
     const raced = cacheKey(USER, 9);
     let injected = false;
     const racyClient: RedisClient = {
+      get: (k) => redis.get(k),
+      set: (k, v, mode, seconds) => redis.set(k, v, mode, seconds),
       sscan: (k, cursor, count, size) => redis.sscan(k, cursor, count, size),
       srem: (k, ...m) => redis.srem(k, ...m),
       unlink: (...k) => redis.unlink(...k),
@@ -186,7 +190,7 @@ describe("invalidateEntities", () => {
       },
     };
 
-    await new EntityIndex(racyClient, { categories: [CATEGORY] }).invalidateEntities(TENANT, CATEGORY, [USER]);
+    await new EntityIndexCacheStrategy(racyClient, { categories: [CATEGORY] }).invalidateEntities(TENANT, CATEGORY, [USER]);
 
     assert.equal(injected, true);
     assert.deepEqual(await redis.smembers(INDEX_KEY), [raced]);
@@ -226,7 +230,7 @@ describe("prune", () => {
 
 describe("registerMany", () => {
   it("writes values and references across bounded transactions with NX/GT and duplicate handling", async () => {
-    const index = new EntityIndex(redis as unknown as RedisClient, {
+    const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, {
       categories: [CATEGORY], batchSize: 2,
     });
     const records = [1, 2, 3].map((v) => ({
@@ -245,7 +249,7 @@ describe("registerMany", () => {
   });
 
   it("validates the entire batch before any writes, even beyond a transaction boundary", async () => {
-    const index = new EntityIndex(redis as unknown as RedisClient, {
+    const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, {
       categories: [CATEGORY], batchSize: 1,
     });
     const valid = { cacheKey: cacheKey(USER, 1), value: "x", ttlSeconds: 100 };
@@ -294,7 +298,7 @@ describe("batch failure reporting", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const result = await new EntityIndex(client as unknown as RedisClient, {
+    const result = await new EntityIndexCacheStrategy(client as unknown as RedisClient, {
       categories: [CATEGORY], batchSize: 1, concurrency: 2,
     }).invalidateEntities(TENANT, CATEGORY, [USER, goodUser]);
     assert.equal(peak, 2);
@@ -339,7 +343,7 @@ describe("cursor pruning", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const result = await new EntityIndex(client as unknown as RedisClient, {
+    const result = await new EntityIndexCacheStrategy(client as unknown as RedisClient, {
       categories: [CATEGORY], batchSize: 2,
     }).prune(TENANT, CATEGORY, USER);
     assert.equal(calls, 3);
@@ -370,7 +374,7 @@ describe("cursor pruning", () => {
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const result = await new EntityIndex(client as unknown as RedisClient, {
+    const result = await new EntityIndexCacheStrategy(client as unknown as RedisClient, {
       categories: [CATEGORY], batchSize: 17,
     }).prune(TENANT, CATEGORY, USER);
     assert.ok(scans > 1);

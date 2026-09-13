@@ -19,6 +19,12 @@ services:
       REDIS_URL: redis://redis:6379
       SEED_KEYS: "${SEED_KEYS:-2000000}"
       SEED_VALUE: "${SEED_VALUE:-1}"
+      SEED_MODE: "${SEED_MODE:-bulk}"
+      LAZY_CONCURRENCY: "${LAZY_CONCURRENCY:-16}"
+      LAZY_MAX_KEYS: "${LAZY_MAX_KEYS:-50000}"
+      LAZY_WARM_USERS: "${LAZY_WARM_USERS:-1000}"
+      ORIGIN_LATENCY_MS: "${ORIGIN_LATENCY_MS:-0}"
+      ORIGIN_FAIL_USER: "${ORIGIN_FAIL_USER:-}"
       TEST_API_URL: http://test-api:3001
       WEBHOOK_URL: http://webhook:3002
     depends_on:

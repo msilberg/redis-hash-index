@@ -46,6 +46,13 @@ never `await` it in the handler.
   copies only `dist/`, so a served string needs no extra copy step. It is one self-contained page —
   keep it CDN-free and framework-free (canvas chart in plain JS). The client reads `/ws` frames and
   polls `GET /api/seed/status` for seed `state` (the `seed-progress` frame carries only done/total).
+- `Seeder(redis, index, filler, config)`: `filler` is the `@Cache`-decorated `SubscriptionService`
+  over the mock `BillingProvider`. Tests that seed must call `configureCache` on their own DB client
+  first, and build the provider with the SAME `seedValue` as the seeder or lazy-warm values diverge.
+- `BillingProvider` throws `OriginError` for origin failures; the seeder tolerates only that class
+  (skips the record, shrinks expected totals) and aborts on anything else (Redis errors).
+- `billing-provider.test.ts` is pure (no DB). `fixture.recordsFor` / `recordOrdinalFor` are the
+  per-user generator both the bulk writer and the provider use — plan IDs depend on record position.
 - A `before`/`beforeEach` hook that `await once(seeder, "done")` hangs forever if the seed emits
   `failed` — race the two events and reject on `failed`.
 - The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,

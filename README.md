@@ -102,6 +102,26 @@ SEED_KEYS=10000000 make up
 The fixture is deterministic from `SEED_VALUE` (default `1`): the same seed produces byte-identical
 keys and values, and nothing large lives in git.
 
+### Seeding environment
+
+Set these in the shell before `make up` (compose forwards them to `benchmark`). `SEED_MODE` and
+`SEED_KEYS` set before `make seed` also override the running container for that one seed.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SEED_KEYS` | `2000000` | Cache records to write |
+| `SEED_VALUE` | `1` | Fixture seed |
+| `SEED_MODE` | `bulk` | `bulk` pipelines ~20k commands per round trip. `lazy` fills every record through the `@Cache` decorator, one record at a time |
+| `LAZY_CONCURRENCY` | `16` | Concurrent decorator fills in the lazy phases |
+| `LAZY_MAX_KEYS` | `50000` | `lazy` refuses a larger `SEED_KEYS`, and the error names this flag. At 2M, a lazy fill takes hours |
+| `LAZY_WARM_USERS` | `1000` | In both modes, users `u_0000000…` (the eviction batch) are filled through `@Cache` as a final `lazy-warm` phase |
+| `ORIGIN_LATENCY_MS` | `0` | Delay added to each call to the mock billing provider (0..60000) |
+| `ORIGIN_FAIL_USER` | — | A user ID the mock provider always fails for. Nothing is cached for that user |
+
+```bash
+SEED_MODE=lazy SEED_KEYS=50000 make reset seed   # same DBSIZE and bytes as a bulk seed of that size
+```
+
 ## 5. Why the legacy run does not finish
 
 One thousand users, one full keyspace scan each, is roughly **35 minutes at 2M records** and about

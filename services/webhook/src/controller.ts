@@ -10,7 +10,7 @@
 // Both endpoints return 202 immediately with {jobId,mode,total}; the work runs in the background
 // and is observable through GET /jobs/:id. A 1,000-user v1 batch is not meant to finish.
 
-import { EntityIndex, type EntityFailure, type RedisClient } from "@redis-hash-index/cache";
+import { EntityIndexCacheStrategy, type EntityFailure, type RedisClient } from "@redis-hash-index/cache";
 import type { Request, Response } from "express";
 import { randomBytes } from "node:crypto";
 import { BATCH_SIZE, CATEGORY, TENANT } from "./config";
@@ -44,12 +44,12 @@ export interface WebhookRedis {
 }
 
 export class WebhookController {
-  private readonly index: EntityIndex;
+  private readonly index: EntityIndexCacheStrategy;
   // Held per controller/app instance so job stores remain isolated.
   private readonly jobs = new Map<string, Job>();
 
   constructor(private readonly redis: WebhookRedis) {
-    this.index = new EntityIndex(redis as unknown as RedisClient, { categories: [CATEGORY] });
+    this.index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
   }
 
   health = (_req: Request, res: Response): void => {

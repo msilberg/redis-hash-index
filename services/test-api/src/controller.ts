@@ -5,7 +5,7 @@
 // It reads via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
 // route. See docs/REDIS-SCHEMA.md.
 
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 import type { Request, Response } from "express";
 import { CATEGORY, TENANT } from "./config";
 
@@ -18,10 +18,10 @@ export interface RedisReader {
 }
 
 export class TestApiController {
-  private readonly index: EntityIndex;
+  private readonly index: EntityIndexCacheStrategy;
 
   constructor(private readonly redis: RedisReader) {
-    this.index = new EntityIndex(redis as unknown as RedisClient, { categories: [CATEGORY] });
+    this.index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
   }
 
   health = (_req: Request, res: Response): void => {

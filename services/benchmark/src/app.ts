@@ -7,7 +7,7 @@
 import express, { type Express, type Request, type Response } from "express";
 
 import { FixtureNotReadyError, RunInProgressError, type Runner } from "./runner";
-import { AlreadySeedingError, type Seeder } from "./seeder";
+import { AlreadySeedingError, SeedRefusedError, type SeedOverrides, type Seeder } from "./seeder";
 import { UI_HTML } from "./ui";
 
 export interface BenchmarkDeps {
@@ -41,16 +41,25 @@ export function createApp(deps: BenchmarkDeps): Express {
       });
   });
 
-  app.post("/api/seed", (_req: Request, res: Response) => {
+  app.post("/api/seed", (req: Request, res: Response) => {
     if (seeder.isSeeding()) {
       res.status(409).json({ error: "a seed is already in progress" });
       return;
     }
+    const overrides = parseSeedOverrides(req.body);
+    if (typeof overrides === "string") {
+      res.status(400).json({ error: overrides });
+      return;
+    }
     try {
-      seeder.start();
+      seeder.start(overrides);
     } catch (err) {
       if (err instanceof AlreadySeedingError) {
         res.status(409).json({ error: err.message });
+        return;
+      }
+      if (err instanceof SeedRefusedError) {
+        res.status(400).json({ error: err.message });
         return;
       }
       throw err;
@@ -98,4 +107,21 @@ export function createApp(deps: BenchmarkDeps): Express {
   });
 
   return app;
+}
+
+/** Optional `{ seedMode, seedKeys }` overriding the container's SEED_MODE / SEED_KEYS. A string is a 400. */
+function parseSeedOverrides(body: unknown): SeedOverrides | string {
+  const { seedMode, seedKeys } = (body ?? {}) as { seedMode?: unknown; seedKeys?: unknown };
+  const overrides: SeedOverrides = {};
+  if (seedMode !== undefined) {
+    if (seedMode !== "bulk" && seedMode !== "lazy") return "seedMode must be 'bulk' or 'lazy'";
+    overrides.seedMode = seedMode;
+  }
+  if (seedKeys !== undefined) {
+    if (typeof seedKeys !== "number" || !Number.isInteger(seedKeys) || seedKeys < 1 || seedKeys > 1_000_000_000) {
+      return "seedKeys must be an integer in 1..1000000000";
+    }
+    overrides.seedKeys = seedKeys;
+  }
+  return overrides;
 }

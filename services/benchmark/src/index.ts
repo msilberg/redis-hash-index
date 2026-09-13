@@ -1,12 +1,14 @@
 import { createServer } from "node:http";
 
 import Redis from "ioredis";
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 
 import { createApp } from "./app";
-import { CATEGORY, loadConfig } from "./config";
+import { BillingProvider } from "./billing-provider";
+import { CATEGORY, loadConfig, SERVICE, TENANT } from "./config";
 import { Runner } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
+import { SubscriptionService } from "./subscription-service";
 import { attachWebSocket } from "./ws";
 
 async function main(): Promise<void> {
@@ -18,11 +20,30 @@ async function main(): Promise<void> {
     console.error(`[benchmark] redis error: ${err.message}`);
   });
 
-  const index = new EntityIndex(redis as unknown as RedisClient, { categories: [CATEGORY] });
-  const seeder = new Seeder(redis as unknown as SeederRedis, index, {
+  // The @Cache decorator resolves its strategies from this registry at call time.
+  configureCache({
+    redis: redis as unknown as RedisClient,
+    service: SERVICE,
+    tenant: TENANT,
+    categories: [CATEGORY],
+  });
+  const subscriptions = new SubscriptionService(
+    new BillingProvider({
+      seedValue: config.seedValue,
+      latencyMs: config.originLatencyMs,
+      failUser: config.originFailUser,
+    }),
+  );
+
+  const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
+  const seeder = new Seeder(redis as unknown as SeederRedis, index, subscriptions, {
     seedKeys: config.seedKeys,
     seedValue: config.seedValue,
     pipelineSize: config.pipelineSize,
+    seedMode: config.seedMode,
+    lazyConcurrency: config.lazyConcurrency,
+    lazyMaxKeys: config.lazyMaxKeys,
+    lazyWarmUsers: config.lazyWarmUsers,
   });
   await seeder.init();
 
@@ -41,7 +62,7 @@ async function main(): Promise<void> {
   const hub = attachWebSocket(server, seeder, runner);
 
   server.listen(config.port, () => {
-    console.log(`[benchmark] listening on :${config.port} (seedKeys=${config.seedKeys})`);
+    console.log(`[benchmark] listening on :${config.port} (seedKeys=${config.seedKeys} seedMode=${config.seedMode})`);
   });
 
   const shutdown = (signal: string): void => {

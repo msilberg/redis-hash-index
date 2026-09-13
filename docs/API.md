@@ -88,6 +88,15 @@ are deleted before references, so any interrupted user is simply re-invalidatabl
 ```
 
 ### `POST /api/seed` → 202. Idempotent: refuses with 409 while already seeding.
+
+Optional body `{ "seedMode": "bulk" | "lazy", "seedKeys": 50000 }` overrides the container's
+`SEED_MODE` / `SEED_KEYS` for this one seed. The seeder returns 400 without touching Redis for a
+malformed override or for `lazy` above `LAZY_MAX_KEYS`. The error message names the flag.
+
+Status also carries `seedMode`, `phase` (`bulk` | `lazy` | `lazy-warm`, the phase running or last
+run) and `originFailures`: records the mock origin refused during a decorator fill, none of them
+cached. `cacheKeys`/`indexKeys` then count what was actually written. `seed-progress` frames
+include `phase`.
 ### `POST /api/seed/reset` → flushes and clears the marker.
 
 ### `POST /api/run`

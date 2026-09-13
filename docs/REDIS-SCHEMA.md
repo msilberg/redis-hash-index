@@ -21,7 +21,7 @@ Key grammar — five `::`-separated segments, no exceptions:
 |---|---|---|
 | `service` | `test-api` | who wrote the record |
 | `tenant` | `demo` | single tenant throughout |
-| `category` | `activeSubscription` | the only indexed category here |
+| `category` | `activeSubscription` | the only indexed category here. In code this is `CacheKey.ACTIVE_SUBSCRIPTION`: every `CacheKey` enum value *is* a category segment |
 | `entityId` | `u_` + 7 zero-padded digits | e.g. `u_0000042` |
 | `params` | `{"v":1}` … `{"v":3}` | the variant. Opaque: never parsed |
 
@@ -47,7 +47,9 @@ counts as *infinite* for a `GT` comparison — so `EXPIRE ... GT` on its own ret
 the index never expires. It must be `EXPIRE key ttl NX` (establish) followed by
 `EXPIRE key ttl GT` (extend, never shorten), both inside one `MULTI`.
 
-The fixture writer uses `EntityIndex.registerMany()` from the shared package. With a supplied
+The fixture writer uses `EntityIndexCacheStrategy.registerMany()` from the shared package. A value
+written through the `@Cache` decorator uses `EntityIndexCacheStrategy.set()`, which calls the same
+`registerMany()`. With a supplied
 value, `SET key value EX ttl` is in the same bounded transaction as the three registration
 commands. The single-key `register()` method uses the same implementation. All records are
 validated before writes; Redis runtime failures are checked but cannot be rolled back.

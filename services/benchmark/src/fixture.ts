@@ -55,36 +55,56 @@ export function expectedTotals(seedKeys: number, seedValue: number): ExpectedTot
 }
 
 /**
- * Yield every user's fixture in id order. `indexKeyFor` is injected (it comes from packages/cache's
- * `EntityIndex.indexKeyFor`) so the index key format has exactly one implementation in the repo.
+ * One user's 1–3 cache records, in variant order. `recordOrdinal` is the number of records every
+ * earlier user owns — plan IDs cycle over the whole fixture, so a record depends on its position.
+ * The bulk writer and the mock billing provider both build records here, so they cannot disagree.
+ */
+export function recordsFor(i: number, seedValue: number, recordOrdinal: number): UserFixture["records"] {
+  const userId = userIdFor(i);
+  const variants = variantsFor(i, seedValue);
+  const records: UserFixture["records"] = [];
+  for (let v = 1; v <= variants; v += 1) {
+    const params = `{"v":${v}}`;
+    const cacheKey = [SERVICE, TENANT, CATEGORY, userId, params].join("::");
+    const planId = PLAN_IDS[(recordOrdinal + v - 1) % PLAN_IDS.length] as string;
+    const seats = 1 + (hashInt(i * 8 + v, seedValue) % 10);
+    const renewDay = 1 + (hashInt(i * 8 + v + 101, seedValue) % 28);
+    const value = JSON.stringify({
+      userId,
+      planId,
+      status: "active",
+      renewsAt: `2026-11-${String(renewDay).padStart(2, "0")}`,
+      seats,
+    });
+    records.push({ cacheKey, value });
+  }
+  return records;
+}
+
+/** Records owned by users `0 .. i-1` — the `recordOrdinal` of user `i`. O(i). */
+export function recordOrdinalFor(i: number, seedValue: number): number {
+  let ordinal = 0;
+  for (let j = 0; j < i; j += 1) ordinal += variantsFor(j, seedValue);
+  return ordinal;
+}
+
+/**
+ * Yield users `fromUser .. userCount-1` in id order. `indexKeyFor` is injected (it comes from
+ * packages/cache's `EntityIndexCacheStrategy.indexKeyFor`) so the index key format has exactly one
+ * implementation in the repo.
  */
 export function* generateUsers(
   seedKeys: number,
   seedValue: number,
   indexKeyFor: (userId: string) => string,
+  fromUser = 0,
 ): Generator<UserFixture> {
   const users = userCount(seedKeys);
-  let recordOrdinal = 0;
-  for (let i = 0; i < users; i += 1) {
+  let recordOrdinal = recordOrdinalFor(fromUser, seedValue);
+  for (let i = fromUser; i < users; i += 1) {
     const userId = userIdFor(i);
-    const variants = variantsFor(i, seedValue);
-    const records: UserFixture["records"] = [];
-    for (let v = 1; v <= variants; v += 1) {
-      const params = `{"v":${v}}`;
-      const cacheKey = [SERVICE, TENANT, CATEGORY, userId, params].join("::");
-      const planId = PLAN_IDS[recordOrdinal % PLAN_IDS.length] as string;
-      const seats = 1 + (hashInt(i * 8 + v, seedValue) % 10);
-      const renewDay = 1 + (hashInt(i * 8 + v + 101, seedValue) % 28);
-      const value = JSON.stringify({
-        userId,
-        planId,
-        status: "active",
-        renewsAt: `2026-11-${String(renewDay).padStart(2, "0")}`,
-        seats,
-      });
-      records.push({ cacheKey, value });
-      recordOrdinal += 1;
-    }
+    const records = recordsFor(i, seedValue, recordOrdinal);
+    recordOrdinal += records.length;
     yield { userId, indexKey: indexKeyFor(userId), records };
   }
 }

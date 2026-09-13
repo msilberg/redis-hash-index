@@ -1,4 +1,4 @@
-import { EntityIndex, type RedisClient } from "@redis-hash-index/cache";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 import Redis from "ioredis";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -10,7 +10,7 @@ const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 const TEST_DB = 15;
 
 const redis = new Redis(REDIS_URL, { db: TEST_DB });
-const index = new EntityIndex(redis as unknown as RedisClient, {
+const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, {
   categories: ["activeSubscription"],
 });
 

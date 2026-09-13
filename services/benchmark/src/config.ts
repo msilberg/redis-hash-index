@@ -20,12 +20,21 @@ export const AVERAGE_VARIANTS = 2;
 // flushes the db and clears it.
 export const MARKER_KEY = "seed::marker";
 
+export type SeedMode = "bulk" | "lazy";
+
 export interface Config {
   port: number;
   redisUrl: string;
   seedKeys: number;
   seedValue: number;
   pipelineSize: number;
+  // Seeding modes and the @Cache fill path (US-010).
+  seedMode: SeedMode;
+  lazyConcurrency: number;
+  lazyMaxKeys: number;
+  lazyWarmUsers: number;
+  originLatencyMs: number;
+  originFailUser: string | undefined;
   // Run driver (US-006). In compose the services address each other by container name.
   testApiBaseUrl: string;
   webhookBaseUrl: string;
@@ -50,6 +59,12 @@ function intFromEnv(
   return value;
 }
 
+function seedModeFromEnv(raw: string | undefined): SeedMode {
+  if (raw === undefined || raw === "") return "bulk";
+  if (raw === "bulk" || raw === "lazy") return raw;
+  throw new Error(`invalid SEED_MODE: ${JSON.stringify(raw)} (want bulk | lazy)`);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: intFromEnv(env.PORT, 3000, "PORT", 1, 65535),
@@ -58,6 +73,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     seedValue: intFromEnv(env.SEED_VALUE, 1, "SEED_VALUE", 0, 0xffff_ffff),
     // Buffer ~20k commands; registerMany splits these into bounded pipelined transactions.
     pipelineSize: intFromEnv(env.SEED_PIPELINE_SIZE, 20_000, "SEED_PIPELINE_SIZE", 1, 5_000_000),
+    // bulk pipelines the fixture; lazy fills every record through @Cache and is capped by LAZY_MAX_KEYS.
+    seedMode: seedModeFromEnv(env.SEED_MODE),
+    lazyConcurrency: intFromEnv(env.LAZY_CONCURRENCY, 16, "LAZY_CONCURRENCY", 1, 1024),
+    lazyMaxKeys: intFromEnv(env.LAZY_MAX_KEYS, 50_000, "LAZY_MAX_KEYS", 1, 1_000_000_000),
+    // Users 0..LAZY_WARM_USERS-1 — the eviction batch — are always filled through @Cache.
+    lazyWarmUsers: intFromEnv(env.LAZY_WARM_USERS, 1000, "LAZY_WARM_USERS", 0, 10_000_000),
+    originLatencyMs: intFromEnv(env.ORIGIN_LATENCY_MS, 0, "ORIGIN_LATENCY_MS", 0, 60_000),
+    originFailUser: env.ORIGIN_FAIL_USER === "" ? undefined : env.ORIGIN_FAIL_USER,
     testApiBaseUrl: env.TEST_API_URL ?? "http://test-api:3001",
     webhookBaseUrl: env.WEBHOOK_URL ?? "http://webhook:3002",
     pollIntervalMs: intFromEnv(env.POLL_INTERVAL_MS, 1000, "POLL_INTERVAL_MS", 10, 3_600_000),

@@ -25,7 +25,7 @@
       "title": "packages/cache \u2014 the shared entity index",
       "description": "As a developer, I need one tested TypeScript module implementing both the index and its invalidation, so test-api and webhook cannot drift apart.",
       "acceptanceCriteria": [
-        "packages/cache exports EntityIndex with: indexKeyFor, parse, register, invalidateEntities, prune",
+        "packages/cache exports EntityIndexCacheStrategy with: indexKeyFor, parse, register, invalidateEntities, prune",
         "register uses MULTI: SADD, then EXPIRE key ttl NX, then EXPIRE key ttl GT \u2014 and inspects every reply tuple",
         "invalidateEntities order is SMEMBERS then UNLINK values then SREM the observed members \u2014 never DEL the set",
         "invalidateEntities deletes every recorded member unconditionally; it must not filter by any timestamp",
