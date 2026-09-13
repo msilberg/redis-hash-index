@@ -139,10 +139,7 @@ export class EntityIndex {
   parse(cacheKey: string): ParsedCacheKey | null {
     const parts = cacheKey.split(KEY_DELIMITER);
     if (parts.length < 5) return null;
-    const service = parts[0];
-    const tenant = parts[1];
-    const entity = parts[2];
-    const entityId = parts[3];
+    const [service, tenant, entity, entityId] = parts;
     const params = parts.slice(4).join(KEY_DELIMITER);
     if (
       service === undefined ||
@@ -182,7 +179,8 @@ export class EntityIndex {
    * @returns `true` if the member was newly added, `false` if it was already present.
    */
   async register(cacheKey: string, ttlSeconds: number): Promise<boolean> {
-    return (await this.registerMany([{ cacheKey, ttlSeconds }])) === 1;
+    const result = await this.registerMany([{ cacheKey, ttlSeconds }]);
+    return result === 1;
   }
 
   /**
@@ -280,7 +278,12 @@ export class EntityIndex {
       }
     };
 
-    await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    try {
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+    } catch (err) {
+      throw new Error(`unexpected error while invalidating entities: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     return result;
   }
 
