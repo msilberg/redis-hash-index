@@ -5,16 +5,16 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
 
-import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
-import { BillingProvider, SubscriptionService, userIdFor } from "@redis-hash-index/fixture";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import { recordOrdinalFor, recordsFor, userIdFor } from "@redis-hash-index/fixture";
 import express, { type Express } from "express";
 import Redis from "ioredis";
 import { WebSocket } from "ws";
 
 import { createApp } from "./app";
-import { CATEGORY, SERVICE, TENANT } from "./config";
+import { CACHE_TTL_SECONDS, CATEGORY, TENANT } from "./config";
 import { RunInProgressError, Runner, type RunnerConfig } from "./runner";
-import { Seeder, type SeederRedis } from "./seeder";
+import { Seeder, type LazyFiller, type SeederRedis } from "./seeder";
 import { attachWebSocket } from "./ws";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
@@ -27,12 +27,22 @@ const SEED_VALUE = 1;
 const redis = new Redis(REDIS_URL, { db: TEST_DB });
 const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
 
-configureCache({ redis: redis as unknown as RedisClient, service: SERVICE, tenant: TENANT, categories: [CATEGORY] });
+// Stands in for test-api → mock-billing in the lazy-warm phase: writes each record the way test-api's
+// @Cache does. seeder.test.ts documents where the real chain is tested.
+const filler: LazyFiller = {
+  originSeedValue: () => Promise.resolve(SEED_VALUE),
+  fill: async (userId, variant) => {
+    const i = Number(userId.slice(2));
+    const record = recordsFor(i, SEED_VALUE, recordOrdinalFor(i, SEED_VALUE))[variant - 1];
+    if (record === undefined) throw new Error(`no record for ${userId} v${variant}`);
+    await index.registerMany([{ ...record, ttlSeconds: CACHE_TTL_SECONDS }]);
+  },
+};
 
 const seeder = new Seeder(
   redis as unknown as SeederRedis,
   index,
-  new SubscriptionService(new BillingProvider({ seedValue: SEED_VALUE, latencyMs: 0 })),
+  filler,
   {
     seedKeys: SEED_KEYS,
     seedValue: SEED_VALUE,
@@ -161,11 +171,11 @@ function fakeWebhook(): Express {
 
 before(async () => {
   await redis.flushdb();
-  seeder.start();
   // Resolve on `done`, reject on `failed` — never hang the suite waiting on an event that won't fire.
   await new Promise<void>((resolve, reject) => {
     seeder.once("done", () => resolve());
     seeder.once("failed", (msg: string) => reject(new Error(`seed failed: ${msg}`)));
+    seeder.start().catch(reject);
   });
 });
 

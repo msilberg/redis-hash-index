@@ -12,13 +12,12 @@ import {
   type RedisClient,
 } from "@redis-hash-index/cache";
 import {
-  BillingProvider,
   CATEGORY,
+  recordOrdinalFor,
+  recordsFor,
   SERVICE,
   TENANT,
   type Subscription,
-  type SubscriptionOrigin,
-  type SubscriptionParams,
 } from "@redis-hash-index/fixture";
 import Redis from "ioredis";
 import assert from "node:assert/strict";
@@ -26,11 +25,14 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, test } from "node:test";
 import { createApp, type RedisReader } from "./app";
+import { OriginError } from "./billing-client";
+import type { SubscriptionOrigin, SubscriptionParams } from "./subscription-service";
 
 const REDIS_URL = process.env.REDIS_URL ?? "redis://localhost:6379";
 // app.test.ts owns DB 15; test files run in parallel.
 const TEST_DB = 14;
-const USER = "u_0000001";
+// u_0000004 has three variants at seed 1, so v=1 and v=2 are two distinct, real records.
+const USER = "u_0000004";
 const FAIL_USER = "u_0000002";
 
 const redis = new Redis(REDIS_URL, { db: TEST_DB });
@@ -39,12 +41,19 @@ const indexKey = index.indexKeyFor(TENANT, CATEGORY, USER);
 const cacheKey = (userId: string, params: SubscriptionParams): string =>
   buildCacheKey(SERVICE, TENANT, CATEGORY, [userId, params]);
 
+/** The fixture's record, as mock-billing would answer it — no socket. FAIL_USER is an OriginError. */
+function fixtureSubscription(userId: string, params: SubscriptionParams = {}): Subscription | null {
+  if (userId === FAIL_USER) throw new OriginError(`billing GET /subscription/${userId} -> 503`);
+  const i = Number(userId.slice(2));
+  const record = recordsFor(i, 1, recordOrdinalFor(i, 1))[(params.v ?? 1) - 1];
+  return record === undefined ? null : (JSON.parse(record.value) as Subscription);
+}
+
 /**
- * The real mock origin with a latch in front of it. `hold()` parks the next origin call until
+ * A fixture origin with a latch in front of it. `hold()` parks the next origin call until
  * `release()`, so "the invalidation lands mid-flight" is an ordering, not a sleep.
  */
 class GatedOrigin implements SubscriptionOrigin {
-  readonly provider = new BillingProvider({ seedValue: 1, latencyMs: 0, failUser: FAIL_USER });
   calls = 0;
   private gate: { entered: () => void; released: Promise<void> } | null = null;
 
@@ -69,7 +78,7 @@ class GatedOrigin implements SubscriptionOrigin {
       gate.entered();
       await gate.released;
     }
-    return await this.provider.getActiveSubscription(userId, params);
+    return fixtureSubscription(userId, params);
   }
 }
 
@@ -114,9 +123,9 @@ test("a fill in flight across an invalidation lands value and reference together
   assert.deepEqual(await redis.smembers(indexKey), [earlierKey]);
 
   // Start a fill and park it inside the origin: the decorator has already missed and will write after.
-  const fillKey = cacheKey(USER, { includeAddons: true });
+  const fillKey = cacheKey(USER, { v: 2 });
   const gate = origin.hold();
-  const fill = getSubscription(`${USER}?includeAddons=true`);
+  const fill = getSubscription(`${USER}?v=2`);
   await gate.entered;
 
   // The invalidation lands mid-flight (the webhook's v2 path) and removes what existed at the time.
@@ -132,7 +141,7 @@ test("a fill in flight across an invalidation lands value and reference together
   const { status, body } = await fill;
   assert.equal(status, 200);
   assert.equal(body.source, "origin");
-  const expected = await origin.provider.getActiveSubscription(USER, { includeAddons: true });
+  const expected = fixtureSubscription(USER, { v: 2 });
   assert.deepEqual(body.subscription, expected);
 
   // Value and reference agree: the only reference names the fill's value, and the only keys are that
@@ -144,13 +153,15 @@ test("a fill in flight across an invalidation lands value and reference together
   // Bounded staleness: the post-invalidation value is armed with the full TTL, and the reference
   // outlives it, so nothing but that TTL — or another invalidation — removes it.
   const valueTtl = await redis.pttl(fillKey);
-  const indexTtl = await redis.pttl(indexKey);
   assert.ok(valueTtl > (TTL.MEDIUM - 5) * 1000 && valueTtl <= TTL.MEDIUM * 1000, `value PTTL ${valueTtl}`);
-  assert.ok(indexTtl >= valueTtl, `index PTTL ${indexTtl} < value PTTL ${valueTtl}`);
+  // Compare absolute expiry times: two PTTL reads a millisecond apart can make the index look shorter.
+  const valueExpiresAt = Number(await redis.call("PEXPIRETIME", fillKey));
+  const indexExpiresAt = Number(await redis.call("PEXPIRETIME", indexKey));
+  assert.ok(indexExpiresAt >= valueExpiresAt, `index expires at ${indexExpiresAt}, before its value at ${valueExpiresAt}`);
 
   // Until then it is served from the cache, without another origin call.
   const callsBefore = origin.calls;
-  const again = await getSubscription(`${USER}?includeAddons=true`);
+  const again = await getSubscription(`${USER}?v=2`);
   assert.equal(again.body.source, "cache");
   assert.equal(origin.calls, callsBefore);
 
@@ -161,15 +172,15 @@ test("a fill in flight across an invalidation lands value and reference together
 });
 
 test("an invalidation after a completed fill removes both value and reference", async () => {
-  const fillKey = cacheKey(USER, { includeAddons: true });
-  const first = await getSubscription(`${USER}?includeAddons=true`);
+  const fillKey = cacheKey(USER, { v: 2 });
+  const first = await getSubscription(`${USER}?v=2`);
   assert.equal(first.status, 200);
   assert.equal(first.body.source, "origin");
   assert.equal(typeof first.body.originMs, "number");
   assert.equal(typeof first.body.latencyMs, "number");
   assert.equal(first.body.variants, 1);
 
-  const second = await getSubscription(`${USER}?includeAddons=true`);
+  const second = await getSubscription(`${USER}?v=2`);
   assert.equal(second.body.source, "cache");
   assert.equal("originMs" in second.body, false);
   assert.deepEqual(second.body.subscription, first.body.subscription);
@@ -181,7 +192,7 @@ test("an invalidation after a completed fill removes both value and reference", 
   assert.equal(await redis.exists(indexKey), 0);
   assert.equal(await redis.dbsize(), 0);
 
-  const third = await getSubscription(`${USER}?includeAddons=true`);
+  const third = await getSubscription(`${USER}?v=2`);
   assert.equal(third.body.source, "origin");
   assert.equal(origin.calls, 2);
 });

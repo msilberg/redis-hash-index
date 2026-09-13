@@ -148,13 +148,15 @@ export function Cache(cacheKey: CacheKey, ttl: TTL | number, strategy: CacheStra
     // Single-flight: one in-flight load per key, per decorated method, in this process.
     const inFlight = new Map<string, Promise<Result>>();
 
+    // `async` with no `await` on purpose: an unconfigured cache or a bad entity ID throws synchronously
+    // below, and callers expect a rejected promise, not an exception from the call expression.
     return async function (this: This, ...args: Args): Promise<Result> {
       const { service, tenant, strategies } = requireRegistry(`@Cache on ${methodName}()`);
       const key = buildCacheKey(service, tenant, cacheKey, args);
       const store = strategies[strategy];
 
       const pending = inFlight.get(key);
-      if (pending !== undefined) return await pending;
+      if (pending !== undefined) return pending;
 
       const load = (async (): Promise<Result> => {
         const cached = await store.get(key);
@@ -169,14 +171,15 @@ export function Cache(cacheKey: CacheKey, ttl: TTL | number, strategy: CacheStra
         }
         await store.set(key, JSON.stringify(result), ttl);
         return result;
-      })();
-
-      inFlight.set(key, load);
-      try {
-        return await load;
-      } finally {
+      })().finally(() => {
         inFlight.delete(key);
-      }
+      });
+
+      // Registered synchronously, before `load` can settle, so a concurrent miss joins it. The cleanup
+      // is chained onto the promise: returning `load` from inside a try/finally would run the finally
+      // at once and end single-flight before the load had even started.
+      inFlight.set(key, load);
+      return load;
     };
   };
 }

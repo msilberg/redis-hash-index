@@ -18,8 +18,8 @@ export class DefaultCacheStrategy {
   }
 
   /** A plain `GET`. `null` is a miss. */
-  async get(key: string): Promise<string | null> {
-    return await this.redis.get(key);
+  get(key: string): Promise<string | null> {
+    return this.redis.get(key);
   }
 
   /** `SET key value EX ttl`. The TTL is validated before any command, so a rejected call writes nothing. */

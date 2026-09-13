@@ -1,41 +1,36 @@
 import { createServer } from "node:http";
 
 import Redis from "ioredis";
-import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
-import { BillingProvider, SubscriptionService } from "@redis-hash-index/fixture";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 
 import { createApp } from "./app";
-import { CATEGORY, loadConfig, SERVICE, TENANT } from "./config";
+import { CATEGORY, loadConfig } from "./config";
+import { TestApiFiller } from "./lazy-filler";
 import { Runner } from "./runner";
 import { Seeder, type SeederRedis } from "./seeder";
 import { attachWebSocket } from "./ws";
+
+// A lazy fill waits on test-api, which waits on mock-billing (BILLING_TIMEOUT_MS, default 5 s).
+const FILL_TIMEOUT_MS = 30_000;
 
 async function main(): Promise<void> {
   const config = loadConfig();
 
   // benchmark opens its OWN Redis connection — never shared with test-api or webhook. See docs/API.md.
+  // Only the bulk writer uses it to write; lazy fills go through test-api over HTTP.
   const redis = new Redis(config.redisUrl);
   redis.on("error", (err: Error) => {
     console.error(`[benchmark] redis error: ${err.message}`);
   });
 
-  // The @Cache decorator resolves its strategies from this registry at call time.
-  configureCache({
-    redis: redis as unknown as RedisClient,
-    service: SERVICE,
-    tenant: TENANT,
-    categories: [CATEGORY],
+  const filler = new TestApiFiller({
+    testApiBaseUrl: config.testApiBaseUrl,
+    mockBillingBaseUrl: config.mockBillingBaseUrl,
+    timeoutMs: FILL_TIMEOUT_MS,
   });
-  const subscriptions = new SubscriptionService(
-    new BillingProvider({
-      seedValue: config.seedValue,
-      latencyMs: config.originLatencyMs,
-      failUser: config.originFailUser,
-    }),
-  );
 
   const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, { categories: [CATEGORY] });
-  const seeder = new Seeder(redis as unknown as SeederRedis, index, subscriptions, {
+  const seeder = new Seeder(redis as unknown as SeederRedis, index, filler, {
     seedKeys: config.seedKeys,
     seedValue: config.seedValue,
     pipelineSize: config.pipelineSize,

@@ -12,3 +12,12 @@ export const PLAN_IDS = ["pro-monthly", "pro-yearly", "team-monthly", "gen-ai-10
 
 // SEED_KEYS is a count of cache *records*; user count is derived so users * averageVariants ≈ SEED_KEYS.
 export const AVERAGE_VARIANTS = 2;
+
+/** The internal record: what a cache value decodes to. Serialise it only with `serializeSubscription`. */
+export interface Subscription {
+  userId: string;
+  planId: string;
+  status: string;
+  renewsAt: string;
+  seats: number;
+}

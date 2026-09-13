@@ -1,24 +1,37 @@
 # Architecture
 
 ```
-                    ┌──────────────┐
-   browser ────────►│  benchmark   │ :3000   UI + WebSocket + seeder + load driver
-                    └──────┬───────┘
-                           │  1 req/sec              batch of user IDs
-                    ┌──────▼───────┐            ┌──────────────┐
-                    │   test-api   │ :3001      │   webhook    │ :3002
-                    └──────┬───────┘            └──────┬───────┘
-                           │ read · fill               │ delete
-                           └─────────┬─────────────────┘
-                                     ▼
-                              ┌─────────────┐
-                              │    redis    │ :6379   single instance, noeviction
-                              └─────────────┘
+                     ┌──────────────┐
+   browser ─────────►│  benchmark   │ :3000   UI + WebSocket + seeder + run driver
+                     └───┬──────┬───┘         (the bulk seed writes Redis directly)
+     1 poll/sec and      │      │  batch of user IDs
+     the lazy fills      │      └───────────────────┐
+                     ┌───▼──────────┐        ┌──────▼───────┐
+                     │   test-api   │ :3001  │   webhook    │ :3002
+                     └───┬──────┬───┘        └──────┬───────┘
+                         │      │ HTTP, on a miss   │
+                         │  ┌───▼──────────┐        │
+                         │  │ mock-billing │ :3003  │   the fake billing provider, no Redis
+                         │  └──────────────┘        │
+                         │ read · fill              │ delete
+                         └────────────┬─────────────┘
+                                      ▼
+                               ┌─────────────┐
+                               │    redis    │ :6379   single instance, noeviction
+                               └─────────────┘
+```
+
+A lazy fill is two hops, each across a real process boundary:
+
+```
+benchmark (seed)  --HTTP-->  test-api  --HTTP-->  mock-billing
+                              │
+                              └── @Cache(ENTITY_INDEX_CACHE) writes Redis on the miss
 ```
 
 ## Why it is shaped like this
 
-**Three separate containers, one Redis.** The demonstration is that an O(N) command on a shared
+**Separate containers, one Redis.** The demonstration is that an O(N) command on a shared
 single-threaded server is not a slow function — it is an outage for everyone else on that server.
 That only shows if the victim (`test-api`) is a genuinely separate process with its own connection
 from the perpetrator (`webhook`). Collapse them into one service and the effect disappears into
@@ -28,6 +41,26 @@ the event loop.
 a second and records the round trip. That includes HTTP overhead, which is honest: it is what a
 real caller experiences. `test-api` also returns its own server-side Redis latency so the chart
 can show both and the gap is visible.
+
+**`test-api` is the only writer of cache keys through `@Cache`.** Every lazily filled record is
+written by the service named in the key's `service` segment (`test-api`). The benchmark reaches it
+over HTTP like any other client; only its bulk writer still talks to Redis directly, through the
+shared `registerMany`, because 2,000,000 records cannot arrive one HTTP request at a time.
+
+**The third party is a service, not a class.** `mock-billing` stands in for a billing provider. It
+sits behind a network hop with a timeout (`BILLING_TIMEOUT_MS`), it can be slow
+(`ORIGIN_LATENCY_MS`) or fail (`ORIGIN_FAIL_USER`, a 503), and it speaks its own snake_case schema,
+which `test-api`'s `billing-client.ts` maps back to the internal record. It never touches Redis and
+does not depend on `packages/cache`.
+
+**Why `packages/fixture` stays shared.** It holds only the generator (`prng`, `fixture`, `schema`):
+the single definition of which record a `(userId, variant, SEED_VALUE)` triple denotes. The bulk
+seeder and `mock-billing` both depend on it. Two copies of the generation rules would let the bulk
+and lazy paths disagree without anything failing, and "the same records, written two ways" would
+stop being true. For the same reason it exports one `serializeSubscription()`: the bulk writer
+stores it, and `test-api`'s mapper normalises through it, so JSON key order cannot split the bytes.
+Because three containers share `SEED_VALUE`, the seeder reads `mock-billing`'s `/health` before its
+first lazy request and refuses the seed, naming both values, if they differ.
 
 **One second of quiet before the batch.** Every run polls for one second first, so the chart has a
 baseline before the eviction starts. Without it the "before" is invisible.
@@ -55,7 +88,7 @@ Services cache a method by annotating it. They never build a key:
 
 ```ts
 @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE)
-async getActiveSubscription(userId: string, params: SubscriptionParams = {}) { … }
+getActiveSubscription(userId: string, params: SubscriptionParams = {}) { … }
 ```
 
 The decorator builds `service::tenant::<CacheKey>::<first argument>::<canonical JSON of the rest>`.
@@ -88,39 +121,50 @@ method looks up its strategy when it is called. Calling one before configuration
 cache is never silently bypassed. These are standard TypeScript 5 decorators: no
 `experimentalDecorators`, no `reflect-metadata`.
 
-**Where the demo uses it.** `SubscriptionService` (in `packages/fixture`, shared by benchmark and
-`test-api`) decorates a call to a
-deterministic mock `BillingProvider`. For a given user and variant, the provider returns exactly
-the record the fixture generator writes, and it never touches Redis. The fixture can be filled two
-ways:
+**Where the demo uses it.** `SubscriptionService` (in `services/test-api`) decorates a call to its
+`SubscriptionOrigin`: in production the S2S `BillingClient` in front of `mock-billing`, in tests a
+stub injected through the constructor. For a given user and variant, `mock-billing` answers with
+exactly the record the fixture generator writes. The fixture can be filled two ways:
 
 - `SEED_MODE=bulk` (the default) pipelines ~20k commands per round trip. This is the only way
   2,000,000 records land in about a minute.
-- `SEED_MODE=lazy` sends every record through the decorator: one `GET`, one origin call and one
-  `MULTI` each. It refuses to run above `LAZY_MAX_KEYS`.
+- `SEED_MODE=lazy` sends every record through the chain: one HTTP request to `test-api`, then one
+  `GET`, one call to `mock-billing` and one `MULTI` each. It refuses to run above `LAZY_MAX_KEYS`.
 
-In both modes, the first `LAZY_WARM_USERS` users are filled through the decorator in a last
+In both modes, the first `LAZY_WARM_USERS` users are filled through the chain in a last
 `lazy-warm` phase. Those users are the eviction batch, so the default run evicts records written
 by `@Cache`. The two modes produce the same `DBSIZE` and byte-identical values for a given
-`SEED_VALUE`, and a test asserts it.
+`SEED_VALUE`. `services/test-api/src/chain.test.ts` asserts it across a real `mock-billing` process
+(bulk-write a user, invalidate it, refill it through the route, compare byte for byte), and
+`make verify` repeats that check against the running stack.
 
 ## Read path
 
-`test-api`'s `GET /subscription/:userId` is the demo's cache *fill*. It calls the same decorated
-`SubscriptionService` the seeder uses, over the same mock `BillingProvider`:
+`test-api`'s `GET /subscription/:userId` is the demo's cache *fill*, and the lazy seeder's too. It
+calls the decorated `SubscriptionService`, whose origin is `mock-billing` over HTTP:
 
 ```ts
 class SubscriptionService {
   @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE)
-  async getActiveSubscription(userId: string, params: SubscriptionParams = {}) {
-    return await this.billing.getActiveSubscription(userId, params);
+  getActiveSubscription(userId: string, params: SubscriptionParams = {}) {
+    return this.billing.getActiveSubscription(userId, params);
   }
 }
 ```
 
+The route builds `SubscriptionParams` field by field — today only `v` — and drops every other query
+parameter. The raw query object never reaches the decorator: `?v=2&include_addons=true` must produce
+the bulk seeder's `{"v":2}` key, or the fill is a permanent miss that an invalidation also never finds.
+
+`BillingClient` turns the remote system's failure modes into what the cache understands. A 2xx
+envelope becomes a `Subscription`. A 404 becomes `null`, an authoritative "no such subscription"
+that is not cached either, because `cacheNegative` stays off. Every other status, a timeout, a refused
+connection and an envelope it cannot map becomes an `OriginError`: never cached, and the route
+answers 502.
+
 **What the decorator hides.** The call site names no key and touches no Redis. The key —
-`test-api::demo::activeSubscription::u_0000001::{"includeAddons":true}` — is built from the
-arguments, and the `params` tail grows a new variant for every new combination of call options.
+`test-api::demo::activeSubscription::u_0000001::{"v":2}` — is built from the arguments, and the
+`params` tail grows a new variant for every new combination of call options.
 Nobody writes that key down, so it is trivially easy to *create*. It is hard to *delete from*: the
 day someone hands you one user ID and says "invalidate this", the variants that exist are whatever
 the callers happened to pass. A pattern scan finds them at O(keyspace); the index finds them because
@@ -151,7 +195,7 @@ that read under an older one refuses to write). This demo deliberately does not 
 
 ## Registration and maintenance policy
 
-The benchmark seeder is the demo's writer. It calls the shared package's
+The benchmark's bulk seeder is the demo's high-volume writer. It calls the shared package's
 `registerMany([{ cacheKey, value, ttlSeconds }])`; `register()` delegates to the same implementation.
 Each bounded transaction (at most 500 records by default) queues `SET EX`, `SADD`,
 `EXPIRE NX`, and `EXPIRE GT`. ioredis pipelines the transaction, so seeding does not require a

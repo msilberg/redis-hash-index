@@ -16,15 +16,15 @@ export interface Config {
   seedKeys: number;
   seedValue: number;
   pipelineSize: number;
-  // Seeding modes and the @Cache fill path (US-010).
+  // Seeding modes (US-010).
   seedMode: SeedMode;
   lazyConcurrency: number;
   lazyMaxKeys: number;
   lazyWarmUsers: number;
-  originLatencyMs: number;
-  originFailUser: string | undefined;
-  // Run driver (US-006). In compose the services address each other by container name.
+  // In compose the services address each other by container name. The lazy phases fill through
+  // test-api (US-011) and check mock-billing's SEED_VALUE first; the run driver (US-006) polls test-api.
   testApiBaseUrl: string;
+  mockBillingBaseUrl: string;
   webhookBaseUrl: string;
   pollIntervalMs: number;
   batchDelayMs: number;
@@ -65,11 +65,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     seedMode: seedModeFromEnv(env.SEED_MODE),
     lazyConcurrency: intFromEnv(env.LAZY_CONCURRENCY, 16, "LAZY_CONCURRENCY", 1, 1024),
     lazyMaxKeys: intFromEnv(env.LAZY_MAX_KEYS, 50_000, "LAZY_MAX_KEYS", 1, 1_000_000_000),
-    // Users 0..LAZY_WARM_USERS-1 — the eviction batch — are always filled through @Cache.
+    // Users 0..LAZY_WARM_USERS-1 — the eviction batch — are always filled through test-api's @Cache.
     lazyWarmUsers: intFromEnv(env.LAZY_WARM_USERS, 1000, "LAZY_WARM_USERS", 0, 10_000_000),
-    originLatencyMs: intFromEnv(env.ORIGIN_LATENCY_MS, 0, "ORIGIN_LATENCY_MS", 0, 60_000),
-    originFailUser: env.ORIGIN_FAIL_USER === "" ? undefined : env.ORIGIN_FAIL_USER,
     testApiBaseUrl: env.TEST_API_URL ?? "http://test-api:3001",
+    mockBillingBaseUrl: env.MOCK_BILLING_URL ?? "http://mock-billing:3003",
     webhookBaseUrl: env.WEBHOOK_URL ?? "http://webhook:3002",
     pollIntervalMs: intFromEnv(env.POLL_INTERVAL_MS, 1000, "POLL_INTERVAL_MS", 10, 3_600_000),
     batchDelayMs: intFromEnv(env.BATCH_DELAY_MS, 1000, "BATCH_DELAY_MS", 0, 3_600_000),

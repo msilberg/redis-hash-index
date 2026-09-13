@@ -10,6 +10,7 @@ COPY packages/fixture packages/fixture
 COPY services/benchmark services/benchmark
 COPY services/test-api/package.json services/test-api/package.json
 COPY services/webhook/package.json services/webhook/package.json
+COPY services/mock-billing/package.json services/mock-billing/package.json
 RUN npm ci
 # packages/fixture has no `prepare`: npm runs workspace prepares in parallel and it needs cache's dist.
 RUN npm run build --workspace @redis-hash-index/fixture

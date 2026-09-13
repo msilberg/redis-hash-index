@@ -10,6 +10,7 @@ import {
   PLAN_IDS,
   SERVICE,
   TENANT,
+  type Subscription,
 } from "./schema";
 import { hashInt } from "./prng";
 
@@ -25,6 +26,17 @@ export interface ExpectedTotals {
   users: number;
   cacheKeys: number;
   indexKeys: number;
+}
+
+/**
+ * The one serialisation of a {@link Subscription}, in a fixed key order. The bulk writer stores this
+ * string, and test-api's envelope mapper normalises through it, so a lazily filled value is
+ * byte-identical to a bulk-seeded one. Two `JSON.stringify` calls over objects built in different
+ * files would silently disagree on key order.
+ */
+export function serializeSubscription(subscription: Subscription): string {
+  const { userId, planId, status, renewsAt, seats } = subscription;
+  return JSON.stringify({ userId, planId, status, renewsAt, seats });
 }
 
 /** User count derived so `users * averageVariants ≈ SEED_KEYS`. Always at least one user. */
@@ -57,7 +69,7 @@ export function expectedTotals(seedKeys: number, seedValue: number): ExpectedTot
 /**
  * One user's 1–3 cache records, in variant order. `recordOrdinal` is the number of records every
  * earlier user owns — plan IDs cycle over the whole fixture, so a record depends on its position.
- * The bulk writer and the mock billing provider both build records here, so they cannot disagree.
+ * The bulk writer and mock-billing both build records here, so they cannot disagree.
  */
 export function recordsFor(i: number, seedValue: number, recordOrdinal: number): UserFixture["records"] {
   const userId = userIdFor(i);
@@ -69,7 +81,7 @@ export function recordsFor(i: number, seedValue: number, recordOrdinal: number):
     const planId = PLAN_IDS[(recordOrdinal + v - 1) % PLAN_IDS.length] as string;
     const seats = 1 + (hashInt(i * 8 + v, seedValue) % 10);
     const renewDay = 1 + (hashInt(i * 8 + v + 101, seedValue) % 28);
-    const value = JSON.stringify({
+    const value = serializeSubscription({
       userId,
       planId,
       status: "active",

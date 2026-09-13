@@ -6,22 +6,18 @@ import { after, before, beforeEach, test } from "node:test";
 
 import Redis from "ioredis";
 import { WebSocket } from "ws";
-import { configureCache, EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
-import {
-  BillingProvider,
-  expectedTotals,
-  generateUsers,
-  SubscriptionService,
-  type SubscriptionParams,
-} from "@redis-hash-index/fixture";
+import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
+import { expectedTotals, generateUsers, recordOrdinalFor, recordsFor } from "@redis-hash-index/fixture";
 
 import { createApp } from "./app";
-import { CATEGORY, MARKER_KEY, SERVICE, TENANT, type SeedMode } from "./config";
+import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT, type SeedMode } from "./config";
+import { OriginFailedError } from "./lazy-filler";
 import { Runner } from "./runner";
 import {
   AlreadySeedingError,
   Seeder,
   SeedRefusedError,
+  type LazyFiller,
   type SeederConfig,
   type SeederRedis,
   type SeedMarker,
@@ -39,21 +35,30 @@ const redis = new Redis(REDIS_URL, { db: TEST_DB });
 const index = new EntityIndexCacheStrategy(redis as unknown as RedisClient, {
   categories: ["activeSubscription"],
 });
-configureCache({ redis: redis as unknown as RedisClient, service: SERVICE, tenant: TENANT, categories: [CATEGORY] });
 
-/** The decorated read, counting every call that reaches the (mock) origin. */
-function countingService(
-  failUser?: string,
-  seedValue = SEED_VALUE,
-): { service: SubscriptionService; originCalls: string[] } {
+/**
+ * An in-process stand-in for test-api → mock-billing, so these tests exercise the seeder's phases and
+ * accounting without two more services. It writes a record the way test-api's @Cache does (value and
+ * index reference in one registerMany MULTI). The real chain — and byte-identity with the bulk writer
+ * across it — is tested in services/test-api/src/chain.test.ts and by `make verify`.
+ */
+function fakeChain(
+  opts: { failUser?: string; seedValue?: number; originSeedValue?: number } = {},
+): { filler: LazyFiller; originCalls: string[] } {
+  const seedValue = opts.seedValue ?? SEED_VALUE;
   const originCalls: string[] = [];
-  const billing = new BillingProvider({ seedValue, latencyMs: 0, failUser });
-  const counting = Object.create(billing) as BillingProvider;
-  counting.getActiveSubscription = (userId: string, params?: SubscriptionParams) => {
-    originCalls.push(userId);
-    return billing.getActiveSubscription(userId, params);
+  const filler: LazyFiller = {
+    originSeedValue: () => Promise.resolve(opts.originSeedValue ?? seedValue),
+    fill: async (userId, variant) => {
+      originCalls.push(userId);
+      if (userId === opts.failUser) throw new OriginFailedError(`billing GET /subscription/${userId} -> 503`);
+      const i = Number(userId.slice(2));
+      const record = recordsFor(i, seedValue, recordOrdinalFor(i, seedValue))[variant - 1];
+      if (record === undefined) throw new Error(`no record for ${userId} v${variant}`);
+      await index.registerMany([{ ...record, ttlSeconds: CACHE_TTL_SECONDS }]);
+    },
   };
-  return { service: new SubscriptionService(counting), originCalls };
+  return { filler, originCalls };
 }
 
 const seederConfig = (over: Partial<SeederConfig> = {}): SeederConfig => ({
@@ -89,13 +94,14 @@ const newSeeder = (seedKeys = SEED_KEYS, seedValue = SEED_VALUE, over: Partial<S
   new Seeder(
     redis as unknown as SeederRedis,
     index,
-    countingService(undefined, seedValue).service,
+    fakeChain({ seedValue }).filler,
     seederConfig({ seedKeys, seedValue, ...over }),
   );
 
 async function seedToReady(seeder: Seeder): Promise<SeedMarker> {
-  seeder.start();
-  const [marker] = (await once(seeder, "done")) as [SeedMarker];
+  const done = once(seeder, "done");
+  await seeder.start();
+  const [marker] = (await done) as [SeedMarker];
   return marker;
 }
 
@@ -206,9 +212,11 @@ test("reset flushes the fixture and the marker", async () => {
 
 test("start() refuses a concurrent seed", async () => {
   const seeder = newSeeder();
-  seeder.start();
-  assert.throws(() => seeder.start(), AlreadySeedingError);
-  await once(seeder, "done");
+  const done = once(seeder, "done");
+  const first = seeder.start();
+  await assert.rejects(seeder.start(), AlreadySeedingError);
+  await first;
+  await done;
 });
 
 test("a shared registration transaction error fails seeding without publishing a marker", async () => {
@@ -224,11 +232,11 @@ test("a shared registration transaction error fails seeding without publishing a
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
-  const seeder = new Seeder(failing as unknown as SeederRedis, index, countingService().service, seederConfig({
+  const seeder = new Seeder(failing as unknown as SeederRedis, index, fakeChain().filler, seederConfig({
     seedKeys: 10,
   }));
   const failed = once(seeder, "failed");
-  seeder.start();
+  await seeder.start();
   const [message] = (await failed) as [string];
   assert.match(message, /WRONGTYPE/);
   assert.equal((await seeder.status()).state, "failed");
@@ -292,8 +300,9 @@ test("WebSocket receives seed-progress frames ending at percent 1", async () => 
 
   try {
     await once(socket, "open");
-    seeder.start();
-    await once(seeder, "done");
+    const done = once(seeder, "done");
+    await seeder.start();
+    await done;
     // let the terminal progress frame flush to the socket
     await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -319,13 +328,13 @@ async function snapshot(): Promise<Map<string, { value: string; ttl: number }>> 
   return out;
 }
 
-async function seedWith(seedMode: SeedMode, over: Partial<SeederConfig> = {}): Promise<SeedMarker> {
-  return await seedToReady(newSeeder(SEED_KEYS, SEED_VALUE, { seedMode, ...over }));
+function seedWith(seedMode: SeedMode, over: Partial<SeederConfig> = {}): Promise<SeedMarker> {
+  return seedToReady(newSeeder(SEED_KEYS, SEED_VALUE, { seedMode, ...over }));
 }
 
-test("lazy-warm fills the eviction batch through @Cache after a bulk seed, byte-identical to the generator", async () => {
-  const { service, originCalls } = countingService();
-  const seeder = new Seeder(redis as unknown as SeederRedis, index, service, seederConfig({ lazyWarmUsers: 30 }));
+test("lazy-warm fills the eviction batch through the filler after a bulk seed, byte-identical to the generator", async () => {
+  const { filler, originCalls } = fakeChain();
+  const seeder = new Seeder(redis as unknown as SeederRedis, index, filler, seederConfig({ lazyWarmUsers: 30 }));
   const phases: string[] = [];
   seeder.on("progress", (frame: SeedProgressFrame) => {
     if (frame.phase !== undefined && phases.at(-1) !== frame.phase) phases.push(frame.phase);
@@ -334,7 +343,7 @@ test("lazy-warm fills the eviction batch through @Cache after a bulk seed, byte-
 
   assert.deepEqual(phases, ["bulk", "lazy-warm"]);
   const warm = [...generateUsers(SEED_KEYS, SEED_VALUE, (u) => index.indexKeyFor(TENANT, CATEGORY, u))].slice(0, 30);
-  // Every warm record reached the origin exactly once (each was a miss), and no other user did.
+  // Every warm record was requested exactly once, and no other user was.
   assert.equal(originCalls.length, warm.reduce((n, u) => n + u.records.length, 0));
   assert.deepEqual([...new Set(originCalls)].sort(), warm.map((u) => u.userId));
   for (const user of warm) {
@@ -345,7 +354,7 @@ test("lazy-warm fills the eviction batch through @Cache after a bulk seed, byte-
   }
 });
 
-test("bulk and lazy seeds of the same SEED_VALUE produce the same keys, values and TTLs", async () => {
+test("bulk and lazy seeds of the same SEED_VALUE account for the same keys, values and TTLs", async () => {
   const bulkMarker = await seedWith("bulk");
   const bulk = await snapshot();
   await redis.flushdb();
@@ -372,7 +381,7 @@ test("lazy refuses above LAZY_MAX_KEYS, naming the flag, before touching the exi
   await seedToReady(seeder);
   const dbsize = await redis.dbsize();
 
-  assert.throws(() => seeder.start({ seedMode: "lazy", seedKeys: 2_000_000 }), (err: unknown) => {
+  await assert.rejects(seeder.start({ seedMode: "lazy", seedKeys: 2_000_000 }), (err: unknown) => {
     assert.ok(err instanceof SeedRefusedError);
     assert.match(err.message, /LAZY_MAX_KEYS=1000/);
     return true;
@@ -381,10 +390,10 @@ test("lazy refuses above LAZY_MAX_KEYS, naming the flag, before touching the exi
   assert.equal(await redis.dbsize(), dbsize);
 });
 
-test("an origin failure during a decorator fill caches nothing for that user and the seed still completes", async () => {
+test("an origin failure during a lazy fill caches nothing for that user and the seed still completes", async () => {
   const failUser = "u_0000002";
-  const { service } = countingService(failUser);
-  const seeder = new Seeder(redis as unknown as SeederRedis, index, service, seederConfig());
+  const { filler } = fakeChain({ failUser });
+  const seeder = new Seeder(redis as unknown as SeederRedis, index, filler, seederConfig());
   const marker = await seedToReady(seeder);
 
   const totals = expectedTotals(SEED_KEYS, SEED_VALUE);
@@ -424,6 +433,50 @@ test("HTTP: POST /api/seed accepts seedMode/seedKeys overrides and 400s a refuse
     assert.equal(status.seedMode, "lazy");
     assert.equal(status.targetKeys, 200);
     assert.equal(status.phase, "lazy-warm");
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("a SEED_VALUE mismatch with mock-billing refuses the seed, naming both values, before touching the fixture", async () => {
+  const seeder = newSeeder();
+  await seedToReady(seeder);
+  const dbsize = await redis.dbsize();
+
+  const { filler, originCalls } = fakeChain({ originSeedValue: 2 });
+  const mismatched = new Seeder(redis as unknown as SeederRedis, index, filler, seederConfig());
+  await mismatched.init();
+  await assert.rejects(mismatched.start(), (err: unknown) => {
+    assert.ok(err instanceof SeedRefusedError);
+    assert.match(err.message, /mock-billing SEED_VALUE=2/);
+    assert.match(err.message, /benchmark SEED_VALUE=1/);
+    return true;
+  });
+  assert.deepEqual(originCalls, [], "no lazy request was made");
+  assert.equal((await mismatched.status()).state, "ready", "the loaded fixture is still reported ready");
+  assert.equal(await redis.dbsize(), dbsize);
+
+  // An unreachable origin refuses too; a bulk seed with no lazy-warm users never asks.
+  const unreachable: LazyFiller = { ...filler, originSeedValue: () => Promise.reject(new Error("ECONNREFUSED")) };
+  await assert.rejects(
+    new Seeder(redis as unknown as SeederRedis, index, unreachable, seederConfig()).start(),
+    /cannot read mock-billing's SEED_VALUE.*ECONNREFUSED/,
+  );
+  const bulkOnly = new Seeder(redis as unknown as SeederRedis, index, unreachable, seederConfig({ lazyWarmUsers: 0 }));
+  await seedToReady(bulkOnly);
+});
+
+test("HTTP: POST /api/seed answers 400 with the SEED_VALUE mismatch", async () => {
+  const seeder = new Seeder(redis as unknown as SeederRedis, index, fakeChain({ originSeedValue: 7 }).filler, seederConfig());
+  const server: Server = await new Promise((resolve) => {
+    const s = createServer(createApp({ seeder, runner: idleRunner(seeder) })).listen(0, () => resolve(s));
+  });
+  const { port } = server.address() as AddressInfo;
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/api/seed`, { method: "POST" });
+    assert.equal(res.status, 400);
+    assert.match(((await res.json()) as { error: string }).error, /SEED_VALUE=7.*SEED_VALUE=1/);
+    assert.equal((await seeder.status()).state, "idle");
   } finally {
     await closeServer(server);
   }

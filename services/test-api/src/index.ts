@@ -1,7 +1,8 @@
 import { configureCache, type RedisClient } from "@redis-hash-index/cache";
-import { BillingProvider, CATEGORY, SERVICE, TENANT } from "@redis-hash-index/fixture";
+import { CATEGORY, SERVICE, TENANT } from "@redis-hash-index/fixture";
 import Redis from "ioredis";
 import { createApp, type RedisReader } from "./app";
+import { BillingClient } from "./billing-client";
 import { loadConfig } from "./config";
 
 const config = loadConfig();
@@ -24,11 +25,8 @@ configureCache({
   categories: [CATEGORY],
 });
 
-const origin = new BillingProvider({
-  seedValue: config.seedValue,
-  latencyMs: config.originLatencyMs,
-  failUser: config.originFailUser,
-});
+// test-api is the only writer of cache keys; what it writes on a miss comes from mock-billing over HTTP.
+const origin = new BillingClient({ baseUrl: config.mockBillingUrl, timeoutMs: config.billingTimeoutMs });
 
 const app = createApp(redis as unknown as RedisReader, origin);
 

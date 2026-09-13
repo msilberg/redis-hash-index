@@ -5,20 +5,15 @@
 // It reads via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
 // route. See docs/REDIS-SCHEMA.md.
 //
-// `GET /subscription/:userId` is the read path (US-009): a read-through fill in front of the fake
-// billing origin, done entirely by the `@Cache` decorator on `SubscriptionService`. This controller
+// `GET /subscription/:userId` is the read path (US-009, US-011): a read-through fill in front of
+// mock-billing, done entirely by the `@Cache` decorator on `SubscriptionService`. This controller
 // never builds a cache key for it.
 
 import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
-import {
-  CATEGORY,
-  SubscriptionService,
-  TENANT,
-  type Subscription,
-  type SubscriptionOrigin,
-  type SubscriptionParams,
-} from "@redis-hash-index/fixture";
+import { CATEGORY, TENANT, type Subscription } from "@redis-hash-index/fixture";
 import type { Request, Response } from "express";
+
+import { SubscriptionService, type SubscriptionOrigin, type SubscriptionParams } from "./subscription-service";
 
 const USER_ID_RE = /^u_\d{7}$/;
 const VARIANT_RE = /^[1-9]\d{0,2}$/;
@@ -115,13 +110,11 @@ export class TestApiController {
   private async readSubscription(userId: string, params: SubscriptionParams): Promise<Record<string, unknown>> {
     let originMs: number | undefined;
     const probe: SubscriptionOrigin = {
-      getActiveSubscription: async (id, p) => {
+      getActiveSubscription: (id, p) => {
         const started = process.hrtime.bigint();
-        try {
-          return await this.origin.getActiveSubscription(id, p);
-        } finally {
+        return this.origin.getActiveSubscription(id, p).finally(() => {
           originMs = elapsedMs(started);
-        }
+        });
       },
     };
 
@@ -145,20 +138,18 @@ export class TestApiController {
 }
 
 /**
- * The query string becomes the decorator's `params` segment, so accept only what the origin
- * understands: `v` (variant) and `includeAddons`. Anything else is ignored and never reaches the key.
+ * The query string is NOT the key. `SubscriptionParams` is built field by field from the key contract
+ * — today only `v` — and everything else (`include_addons`, tracking parameters, typos) is dropped, so
+ * `?v=2` produces exactly the bulk seeder's `{"v":2}` key. Passing the raw query through would make a
+ * stray parameter a different key: a permanent miss, and an invalidation that leaves it behind.
  * Returns an error message for a malformed value.
  */
 function subscriptionParams(query: Request["query"]): SubscriptionParams | string {
   const params: SubscriptionParams = {};
-  const { v, includeAddons } = query;
+  const { v } = query;
   if (v !== undefined) {
     if (typeof v !== "string" || !VARIANT_RE.test(v)) return "v must be a positive integer";
     params.v = Number(v);
-  }
-  if (includeAddons !== undefined) {
-    if (includeAddons !== "true" && includeAddons !== "false") return "includeAddons must be true or false";
-    params.includeAddons = includeAddons === "true";
   }
   return params;
 }

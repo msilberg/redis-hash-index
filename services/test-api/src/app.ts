@@ -1,6 +1,6 @@
-import type { SubscriptionOrigin } from "@redis-hash-index/fixture";
 import express, { type Express } from "express";
 import { TestApiController, type RedisReader } from "./controller";
+import type { SubscriptionOrigin } from "./subscription-service";
 
 export type { RedisReader } from "./controller";
 

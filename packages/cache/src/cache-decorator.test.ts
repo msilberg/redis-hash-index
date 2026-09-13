@@ -73,13 +73,13 @@ class SubscriptionService {
   constructor(readonly origin: Origin) {}
 
   @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE)
-  async getActiveSubscription(userId: string, _params: Record<string, unknown> = {}): Promise<Subscription | null | undefined> {
-    return await this.origin.fetch(userId);
+  getActiveSubscription(userId: string, _params: Record<string, unknown> = {}): Promise<Subscription | null | undefined> {
+    return this.origin.fetch(userId);
   }
 
   @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.SHORT, CacheStrategy.ENTITY_INDEX_CACHE, { cacheNegative: true, negativeTtl: 60 })
-  async getWithNegative(userId: string): Promise<Subscription | null | undefined> {
-    return await this.origin.fetch(userId);
+  getWithNegative(userId: string): Promise<Subscription | null | undefined> {
+    return this.origin.fetch(userId);
   }
 
   @Cache(CacheKey.PLAN_CONFIG, TTL.LONG, CacheStrategy.DEFAULT)

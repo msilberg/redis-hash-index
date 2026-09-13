@@ -1,7 +1,11 @@
 # services/
 
-Three Express services, each its own npm workspace. They share `packages/cache` and nothing else —
-in particular each opens its **own** ioredis connection (`new Redis(REDIS_URL)`), never a shared one.
+Four Express services, each its own npm workspace. They share `packages/*` and nothing else — never
+import another service's workspace. Each Redis-using service opens its **own** ioredis connection
+(`new Redis(REDIS_URL)`), never a shared one; `mock-billing` opens none.
+
+Every Dockerfile's build stage copies EVERY workspace's `package.json` (`npm ci` checks the lockfile
+against all of them). Adding a workspace means adding a `COPY <ws>/package.json` line to all of them.
 
 ## Consuming `packages/cache`
 
@@ -46,14 +50,18 @@ never `await` it in the handler.
   copies only `dist/`, so a served string needs no extra copy step. It is one self-contained page —
   keep it CDN-free and framework-free (canvas chart in plain JS). The client reads `/ws` frames and
   polls `GET /api/seed/status` for seed `state` (the `seed-progress` frame carries only done/total).
-- `Seeder(redis, index, filler, config)`: `filler` is the `@Cache`-decorated `SubscriptionService`
-  over the mock `BillingProvider`. Tests that seed must call `configureCache` on their own DB client
-  first, and build the provider with the SAME `seedValue` as the seeder or lazy-warm values diverge.
-- `BillingProvider` throws `OriginError` for origin failures; the seeder tolerates only that class
-  (skips the record, shrinks expected totals) and aborts on anything else (Redis errors).
-- The fixture generator, `BillingProvider` and `SubscriptionService` live in `packages/fixture`
-  (shared with test-api). `fixture.recordsFor` / `recordOrdinalFor` are the per-user generator both
-  the bulk writer and the provider use — plan IDs depend on record position.
+- `Seeder(redis, index, filler, config)`: `filler` is a `LazyFiller` — in production `TestApiFiller`
+  (`src/lazy-filler.ts`), which fills a record by `GET {TEST_API_URL}/subscription/:userId?v=n` and
+  reads `GET {MOCK_BILLING_URL}/health` for the seed-value check. benchmark no longer calls
+  `configureCache`. Tests inject an in-process `fakeChain` filler that `registerMany`s the generator's
+  record; the real chain is tested in test-api's `chain.test.ts` and by `make verify`.
+- `seeder.start()` is **async**: it claims `state = "seeding"` synchronously, then checks mock-billing's
+  SEED_VALUE (only if a lazy request will happen) and rejects with `SeedRefusedError` → 400, restoring
+  the previous state. Tests must `await` it and attach `once(seeder, "done")` BEFORE awaiting.
+- The filler throws `OriginFailedError` for a test-api 502; the seeder tolerates only that class
+  (skips the record, shrinks expected totals) and aborts on anything else.
+- `fixture.recordsFor` / `recordOrdinalFor` are the per-user generator both the bulk writer and
+  mock-billing use — plan IDs depend on record position.
 - A `before`/`beforeEach` hook that `await once(seeder, "done")` hangs forever if the seed emits
   `failed` — race the two events and reject on `failed`.
 - The seeder is deterministic from `SEED_VALUE`: `fixture.ts` generates byte-identical users,
@@ -73,11 +81,27 @@ never `await` it in the handler.
 
 - `createApp(redis, origin)`: `/entitlement` is the SMEMBERS+MGET bystander the run driver and
   `make verify` poll; `/subscription` is the `@Cache` read-through. Don't merge or rename them.
+- `origin` is a `SubscriptionOrigin` (`src/subscription-service.ts`): `BillingClient` in production
+  (`src/billing-client.ts` — every non-2xx except 404, timeout, refusal and bad envelope is an
+  `OriginError`; 404 is `null`), a stub in tests. `SubscriptionParams` is the key contract: the route
+  copies `v` from the query and nothing else.
 - The controller builds `new SubscriptionService(probe)` per request, the probe wrapping the shared
   origin — that is how a request learns `source`/`originMs`. The decorator's single-flight map is per
   decorated method, not per instance, so this does not defeat it.
-- `app.test.ts` owns DB 15, `read-path.test.ts` DB 14 and calls `configureCache` itself. The
-  interleaving test parks the origin on a latch (`GatedOrigin.hold()`) — order, not sleeps.
+- `app.test.ts` owns DB 15, `read-path.test.ts` DB 14, `chain.test.ts` DB 13; the last two call
+  `configureCache` themselves. The interleaving test parks the origin on a latch
+  (`GatedOrigin.hold()`) — order, not sleeps.
+- `chain.test.ts` SPAWNS mock-billing (`node --import tsx ../mock-billing/src/index.ts`, `PORT=0`) and
+  parses the port from its `listening on :N` log line. Change that line and the test cannot start.
+
+## mock-billing
+
+- The fake third party. Depends on `packages/fixture` only — no cache package, no ioredis. Its
+  envelope (`src/envelope.ts`) is snake_case on purpose; test-api owns the mapping back.
+- The self-check `grep -rn "ioredis\|redis" services/mock-billing/src` always matches the
+  `@redis-hash-index/fixture` import lines (the package scope contains "redis"). Everything else must
+  be clean — don't write "redis" in lowercase in its comments.
+- Tests are pure HTTP on an ephemeral port; no database.
 
 ## Tests
 

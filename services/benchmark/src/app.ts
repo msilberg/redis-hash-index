@@ -51,20 +51,20 @@ export function createApp(deps: BenchmarkDeps): Express {
       res.status(400).json({ error: overrides });
       return;
     }
-    try {
-      seeder.start(overrides);
-    } catch (err) {
-      if (err instanceof AlreadySeedingError) {
-        res.status(409).json({ error: err.message });
-        return;
-      }
-      if (err instanceof SeedRefusedError) {
-        res.status(400).json({ error: err.message });
-        return;
-      }
-      throw err;
-    }
-    res.status(202).json({ state: "seeding" });
+    seeder
+      .start(overrides)
+      .then(() => {
+        res.status(202).json({ state: "seeding" });
+      })
+      .catch((err: unknown) => {
+        if (err instanceof AlreadySeedingError) {
+          res.status(409).json({ error: err.message });
+        } else if (err instanceof SeedRefusedError) {
+          res.status(400).json({ error: err.message });
+        } else {
+          res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+        }
+      });
   });
 
   app.post("/api/run", (req: Request, res: Response) => {

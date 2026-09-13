@@ -1,11 +1,12 @@
 // The seeder — a small state machine that writes the deterministic fixture into Redis, inspecting
 // every reply, and records a marker so a container restart does not reseed.
 //
-// Two paths write the same records (US-010). `bulk` pipelines ~20k commands per round trip — the only
-// way 2M records land in about a minute. `lazy` fills each record through the @Cache decorator: one
-// GET, one origin call and one MULTI per record, so it is capped at LAZY_MAX_KEYS. In both modes the
-// first LAZY_WARM_USERS users — the eviction batch — are filled through the decorator as a final
-// `lazy-warm` phase. See US-005.md, US-010.md and docs/REDIS-SCHEMA.md.
+// Two paths write the same records (US-010, US-011). `bulk` pipelines ~20k commands per round trip —
+// the only way 2M records land in about a minute. `lazy` asks test-api for each record over HTTP, and
+// test-api's @Cache fills it from mock-billing: two network hops, one GET, one origin call and one
+// MULTI per record, so it is capped at LAZY_MAX_KEYS. In both modes the first LAZY_WARM_USERS users —
+// the eviction batch — are filled that way as a final `lazy-warm` phase. See US-005.md, US-010.md,
+// US-011.md and docs/REDIS-SCHEMA.md.
 
 import { EventEmitter } from "node:events";
 
@@ -13,7 +14,6 @@ import type { EntityIndexCacheStrategy, Registration } from "@redis-hash-index/c
 import {
   expectedTotals,
   generateUsers,
-  OriginError,
   userCount,
   userIdFor,
   variantsFor,
@@ -21,6 +21,7 @@ import {
 } from "@redis-hash-index/fixture";
 
 import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT, type SeedMode } from "./config";
+import { OriginFailedError } from "./lazy-filler";
 
 export type SeedState = "idle" | "seeding" | "ready" | "failed";
 
@@ -34,7 +35,7 @@ export interface SeedStatus {
   seedMode: SeedMode;
   /** The phase running now, or the last one that ran. Absent before any seed. */
   phase?: SeedPhase;
-  /** Records the origin refused to produce during a decorator fill (e.g. ORIGIN_FAIL_USER). Never cached. */
+  /** Records test-api answered 502 for during a lazy fill (e.g. mock-billing's fail user). Never cached. */
   originFailures: number;
   users: number;
   cacheKeys: number;
@@ -91,9 +92,12 @@ export interface SeedOverrides {
   seedKeys?: number;
 }
 
-/** The decorated read the lazy paths fill through — `SubscriptionService` in production. */
+/** How the lazy paths fill one record — `TestApiFiller` (HTTP through test-api) in production. */
 export interface LazyFiller {
-  getActiveSubscription(userId: string, params: { v: number }): Promise<unknown>;
+  /** The SEED_VALUE the origin generates from; checked against ours before any lazy request. */
+  originSeedValue(): Promise<number>;
+  /** Fill one record. Throws {@link OriginFailedError} when the origin failed and nothing was cached. */
+  fill(userId: string, variant: number): Promise<void>;
 }
 
 export class AlreadySeedingError extends Error {
@@ -172,10 +176,12 @@ export class Seeder extends EventEmitter {
   }
 
   /**
-   * Begin seeding in the background. Throws {@link AlreadySeedingError} if one is already running and
-   * {@link SeedRefusedError} — before touching Redis — if `lazy` is asked for more than LAZY_MAX_KEYS.
+   * Begin seeding in the background; resolves once the seed has been accepted. Rejects with
+   * {@link AlreadySeedingError} if one is already running, and with {@link SeedRefusedError} — before
+   * touching Redis — if `lazy` is asked for more than LAZY_MAX_KEYS, or if a lazy fill would run
+   * against an origin whose SEED_VALUE differs from ours.
    */
-  start(overrides: SeedOverrides = {}): void {
+  async start(overrides: SeedOverrides = {}): Promise<void> {
     if (this.state === "seeding") throw new AlreadySeedingError();
     const seedMode = overrides.seedMode ?? this.config.seedMode;
     const seedKeys = overrides.seedKeys ?? this.config.seedKeys;
@@ -185,7 +191,16 @@ export class Seeder extends EventEmitter {
           "(a lazy fill is one origin call and one MULTI per record) — use SEED_MODE=bulk or raise LAZY_MAX_KEYS",
       );
     }
+    // Claim the state before the first await, so a concurrent start() is refused while we check.
+    const previous = this.state;
     this.state = "seeding";
+    const lazyRequests = seedMode === "lazy" || Math.min(this.config.lazyWarmUsers, userCount(seedKeys)) > 0;
+    try {
+      if (lazyRequests) await this.assertOriginSeedValue();
+    } catch (err) {
+      this.state = previous;
+      throw err;
+    }
     this.seedKeys = seedKeys;
     this.seedMode = seedMode;
     this.phase = undefined;
@@ -195,6 +210,26 @@ export class Seeder extends EventEmitter {
     this.expected = expectedTotals(seedKeys, this.config.seedValue);
     this.total = this.expected.cacheKeys + this.expected.indexKeys;
     void this.run();
+  }
+
+  /**
+   * Three containers share SEED_VALUE. A mismatch would not fail loudly — it would fill records that
+   * differ from the bulk ones — so compare with mock-billing's before the first lazy request.
+   */
+  private async assertOriginSeedValue(): Promise<void> {
+    let origin: number;
+    try {
+      origin = await this.filler.originSeedValue();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new SeedRefusedError(`refusing to seed: cannot read mock-billing's SEED_VALUE before a lazy fill (${message})`);
+    }
+    if (origin !== this.config.seedValue) {
+      throw new SeedRefusedError(
+        `refusing to seed: mock-billing SEED_VALUE=${origin} differs from benchmark SEED_VALUE=${this.config.seedValue} ` +
+          "— lazily filled records would not match the bulk fixture. Start both with the same SEED_VALUE",
+      );
+    }
   }
 
   /** Flush the database and clear the marker. Refuses while seeding. */
@@ -310,7 +345,7 @@ export class Seeder extends EventEmitter {
 
   private enterPhase(phase: SeedPhase, users: number): void {
     this.phase = phase;
-    const how = phase === "bulk" ? "pipelined" : `through @Cache, concurrency ${this.config.lazyConcurrency}`;
+    const how = phase === "bulk" ? "pipelined" : `through test-api, concurrency ${this.config.lazyConcurrency}`;
     console.log(`[benchmark] seed phase ${phase}: ${users} users ${how}`);
     this.emit("progress", this.progressFrame());
   }
@@ -341,9 +376,9 @@ export class Seeder extends EventEmitter {
   }
 
   /**
-   * Users `fromUser..toUser-1`, every variant filled by calling the decorated read. An {@link OriginError}
-   * skips that record — the decorator wrote nothing, and the expected totals shrink to match. Any other
-   * error (a Redis write failing inside the decorator) aborts the seed.
+   * Users `fromUser..toUser-1`, every variant filled through the filler. An {@link OriginFailedError}
+   * skips that record — test-api wrote nothing, and the expected totals shrink to match. Any other
+   * error (test-api unreachable, a Redis write failing inside it) aborts the seed.
    */
   private async fillLazy(fromUser: number, toUser: number): Promise<void> {
     let next = fromUser;
@@ -357,10 +392,10 @@ export class Seeder extends EventEmitter {
         let filled = 0;
         for (let v = 1; v <= variants; v += 1) {
           try {
-            await this.filler.getActiveSubscription(userId, { v });
+            await this.filler.fill(userId, v);
             filled += 1;
           } catch (err) {
-            if (!(err instanceof OriginError)) {
+            if (!(err instanceof OriginFailedError)) {
               aborted = true; // stop the other workers writing into a seed that has already failed
               throw err;
             }

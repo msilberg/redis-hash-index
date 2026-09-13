@@ -23,14 +23,16 @@ services:
       LAZY_CONCURRENCY: "${LAZY_CONCURRENCY:-16}"
       LAZY_MAX_KEYS: "${LAZY_MAX_KEYS:-50000}"
       LAZY_WARM_USERS: "${LAZY_WARM_USERS:-1000}"
-      ORIGIN_LATENCY_MS: "${ORIGIN_LATENCY_MS:-0}"
-      ORIGIN_FAIL_USER: "${ORIGIN_FAIL_USER:-}"
+      # Lazy fills go benchmark -> test-api -> mock-billing; mock-billing's SEED_VALUE is checked first.
       TEST_API_URL: http://test-api:3001
+      MOCK_BILLING_URL: http://mock-billing:3003
       WEBHOOK_URL: http://webhook:3002
     depends_on:
       redis:
         condition: service_healthy
       test-api:
+        condition: service_healthy
+      mock-billing:
         condition: service_healthy
       webhook:
         condition: service_healthy
@@ -49,16 +51,35 @@ services:
     environment:
       PORT: "3001"
       REDIS_URL: redis://redis:6379
-      # The fake billing origin behind GET /subscription. SEED_VALUE must match benchmark's.
-      SEED_VALUE: "${SEED_VALUE:-1}"
-      ORIGIN_LATENCY_MS: "${ORIGIN_LATENCY_MS:-0}"
-      ORIGIN_FAIL_USER: "${ORIGIN_FAIL_USER:-}"
+      # The origin behind GET /subscription, one network hop away.
+      MOCK_BILLING_URL: http://mock-billing:3003
+      BILLING_TIMEOUT_MS: "${BILLING_TIMEOUT_MS:-5000}"
     depends_on:
       redis:
+        condition: service_healthy
+      mock-billing:
         condition: service_healthy
     healthcheck:
       test:
         ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # The fake third party ("Chargebee"). No Redis, no dependencies. SEED_VALUE must match benchmark's.
+  mock-billing:
+    build:
+      context: .
+      dockerfile: services/mock-billing/Dockerfile
+    ports: ["3003:3003"]
+    environment:
+      PORT: "3003"
+      SEED_VALUE: "${SEED_VALUE:-1}"
+      ORIGIN_LATENCY_MS: "${ORIGIN_LATENCY_MS:-0}"
+      ORIGIN_FAIL_USER: "${ORIGIN_FAIL_USER:-}"
+    healthcheck:
+      test:
+        ["CMD", "node", "-e", "fetch('http://127.0.0.1:3003/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 5s
       timeout: 3s
       retries: 10

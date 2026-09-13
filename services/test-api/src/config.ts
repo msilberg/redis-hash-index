@@ -1,11 +1,9 @@
 export interface Config {
   port: number;
   redisUrl: string;
-  // The fake billing origin behind GET /subscription (US-009). SEED_VALUE must match the benchmark's
-  // or a filled record differs from the seeded one.
-  seedValue: number;
-  originLatencyMs: number;
-  originFailUser: string | undefined;
+  // The origin behind GET /subscription (US-011): mock-billing, one network hop away.
+  mockBillingUrl: string;
+  billingTimeoutMs: number;
 }
 
 function intFromEnv(raw: string | undefined, fallback: number, name: string, min: number, max: number): number {
@@ -20,8 +18,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: intFromEnv(env.PORT, 3001, "PORT", 1, 65535),
     redisUrl: env.REDIS_URL ?? "redis://localhost:6379",
-    seedValue: intFromEnv(env.SEED_VALUE, 1, "SEED_VALUE", 0, 0xffff_ffff),
-    originLatencyMs: intFromEnv(env.ORIGIN_LATENCY_MS, 0, "ORIGIN_LATENCY_MS", 0, 60_000),
-    originFailUser: env.ORIGIN_FAIL_USER === undefined || env.ORIGIN_FAIL_USER === "" ? undefined : env.ORIGIN_FAIL_USER,
+    mockBillingUrl: env.MOCK_BILLING_URL ?? "http://mock-billing:3003",
+    billingTimeoutMs: intFromEnv(env.BILLING_TIMEOUT_MS, 5000, "BILLING_TIMEOUT_MS", 1, 600_000),
   };
 }

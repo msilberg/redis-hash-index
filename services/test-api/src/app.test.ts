@@ -1,5 +1,4 @@
 import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
-import { BillingProvider } from "@redis-hash-index/fixture";
 import Redis from "ioredis";
 import assert from "node:assert/strict";
 import type { Server } from "node:http";
@@ -20,7 +19,9 @@ let baseUrl: string;
 
 before(async () => {
   await redis.flushdb();
-  const app = createApp(redis as unknown as RedisReader, new BillingProvider({ seedValue: 1, latencyMs: 0 }));
+  // /entitlement never reaches the origin; the 400 cases below are rejected before it.
+  const origin = { getActiveSubscription: () => Promise.reject(new Error("origin must not be called")) };
+  const app = createApp(redis as unknown as RedisReader, origin);
   await new Promise<void>((resolve) => {
     server = app.listen(0, resolve);
   });
@@ -30,6 +31,7 @@ before(async () => {
 
 after(async () => {
   await new Promise<void>((resolve) => {
+    server.closeAllConnections();
     server.close(() => {
       resolve();
     });
@@ -82,7 +84,7 @@ test("GET /entitlement/:userId rejects a malformed id with 400", async () => {
 });
 
 test("GET /subscription/:userId rejects a malformed id or query with 400 before touching the cache", async () => {
-  for (const path of ["/subscription/bogus", "/subscription/u_0000001?v=0", "/subscription/u_0000001?includeAddons=yes"]) {
+  for (const path of ["/subscription/bogus", "/subscription/u_0000001?v=0", "/subscription/u_0000001?v=two"]) {
     const res = await fetch(`${baseUrl}${path}`);
     assert.equal(res.status, 400, path);
   }

@@ -18,28 +18,38 @@ waits behind it.
 
 ## 1. What this shows
 
-Three Express services and one Redis, each in its own container:
+Four Express services and one Redis, each in its own container:
 
 ```
-                    ┌──────────────┐
-   browser ────────►│  benchmark   │ :3000   UI + WebSocket + seeder + run driver
-                    └──────┬───────┘
-                           │  1 poll/sec             batch of 1000 user IDs
-                    ┌──────▼───────┐            ┌──────────────┐
-                    │   test-api   │ :3001      │   webhook    │ :3002
-                    └──────┬───────┘            └──────┬───────┘
-                           │ read (SMEMBERS+MGET)      │ delete (v1 KEYS · v2 index)
-                           └─────────┬─────────────────┘
-                                     ▼
-                              ┌─────────────┐
-                              │    redis    │ :6379   single instance, noeviction
-                              └─────────────┘
+                     ┌──────────────┐
+   browser ─────────►│  benchmark   │ :3000   UI + WebSocket + seeder + run driver
+                     └───┬──────┬───┘         (the bulk seed writes Redis directly)
+     1 poll/sec and      │      │  batch of user IDs
+     the lazy fills      │      └───────────────────┐
+                     ┌───▼──────────┐        ┌──────▼───────┐
+                     │   test-api   │ :3001  │   webhook    │ :3002
+                     └───┬──────┬───┘        └──────┬───────┘
+                         │      │ HTTP, on a miss   │
+                         │  ┌───▼──────────┐        │
+                         │  │ mock-billing │ :3003  │   the fake billing provider, no Redis
+                         │  └──────────────┘        │
+                         │ read · fill              │ delete
+                         └────────────┬─────────────┘
+                                      ▼
+                               ┌─────────────┐
+                               │    redis    │ :6379   single instance, noeviction
+                               └─────────────┘
 ```
 
 `test-api` is the innocent bystander. It has its **own** Redis connection and never scans. When
 the webhook starts a v1 scan, `test-api` gets slower — not because it did anything, but because it
 is queued behind a command that holds the server. That is the whole demonstration, and it only
 shows because the victim and the perpetrator are genuinely separate processes.
+
+`mock-billing` is the fake third party the cache sits in front of. The fill chain is
+`benchmark → test-api → mock-billing`: a cache miss in `test-api`'s `@Cache` calls `mock-billing`
+over HTTP and writes the answer to Redis, so `test-api` is the only service writing cache keys
+through the decorator.
 
 ## 2. Quick start
 
@@ -104,20 +114,24 @@ keys and values, and nothing large lives in git.
 
 ### Seeding environment
 
-Set these in the shell before `make up` (compose forwards them to `benchmark`; `SEED_VALUE` and the
-two `ORIGIN_*` variables also reach `test-api`, whose `/subscription` route uses the same mock origin). `SEED_MODE` and
-`SEED_KEYS` set before `make seed` also override the running container for that one seed.
+Set these in the shell before `make up`. Compose forwards them to the service in the last column.
+`SEED_VALUE` reaches both `benchmark` and `mock-billing`; the seeder refuses a lazy fill, naming
+both values, if they differ. `SEED_MODE` and `SEED_KEYS` set before `make seed` also override the
+running container for that one seed.
 
-| Variable | Default | What it does |
-|---|---|---|
-| `SEED_KEYS` | `2000000` | Cache records to write |
-| `SEED_VALUE` | `1` | Fixture seed |
-| `SEED_MODE` | `bulk` | `bulk` pipelines ~20k commands per round trip. `lazy` fills every record through the `@Cache` decorator, one record at a time |
-| `LAZY_CONCURRENCY` | `16` | Concurrent decorator fills in the lazy phases |
-| `LAZY_MAX_KEYS` | `50000` | `lazy` refuses a larger `SEED_KEYS`, and the error names this flag. At 2M, a lazy fill takes hours |
-| `LAZY_WARM_USERS` | `1000` | In both modes, users `u_0000000…` (the eviction batch) are filled through `@Cache` as a final `lazy-warm` phase |
-| `ORIGIN_LATENCY_MS` | `0` | Delay added to each call to the mock billing provider (0..60000) |
-| `ORIGIN_FAIL_USER` | — | A user ID the mock provider always fails for. Nothing is cached for that user |
+| Variable | Default | What it does | Service |
+|---|---|---|---|
+| `SEED_KEYS` | `2000000` | Cache records to write | benchmark |
+| `SEED_VALUE` | `1` | Fixture seed. Must match between the two services | benchmark, mock-billing |
+| `SEED_MODE` | `bulk` | `bulk` pipelines ~20k commands per round trip. `lazy` requests every record from `test-api`, which fills it through `@Cache` from `mock-billing` | benchmark |
+| `LAZY_CONCURRENCY` | `16` | Concurrent HTTP fills in the lazy phases | benchmark |
+| `LAZY_MAX_KEYS` | `50000` | `lazy` refuses a larger `SEED_KEYS`, and the error names this flag. At 2M, a lazy fill takes hours | benchmark |
+| `LAZY_WARM_USERS` | `1000` | In both modes, users `u_0000000…` (the eviction batch) are filled through the chain as a final `lazy-warm` phase | benchmark |
+| `BILLING_TIMEOUT_MS` | `5000` | `test-api`'s timeout for each call to `mock-billing`. A timeout is a 502 and caches nothing | test-api |
+| `ORIGIN_LATENCY_MS` | `0` | Delay before each `mock-billing` answer (0..60000) | mock-billing |
+| `ORIGIN_FAIL_USER` | — | A user ID `mock-billing` always answers 503 for. `test-api` returns 502 and caches nothing | mock-billing |
+
+Ports: `benchmark` 3000, `test-api` 3001, `webhook` 3002, `mock-billing` 3003, Redis 6379.
 
 ```bash
 SEED_MODE=lazy SEED_KEYS=50000 make reset seed   # same DBSIZE and bytes as a bulk seed of that size
@@ -156,8 +170,8 @@ scan.
   not scheduled; fixture index sets expire after one hour. See the
   [registration and maintenance policy](docs/ARCHITECTURE.md#registration-and-maintenance-policy).
 - The demo fills the cache as well as evicting it: `test-api`'s `GET /subscription/:userId` is a
-  read-through through `@Cache`. Its origin is fake and deterministic (the mock `BillingProvider`),
-  and a fill racing an invalidation gives bounded staleness, not atomicity — see
+  read-through through `@Cache`. Its origin, `mock-billing`, is a real service behind a network hop
+  but fake and deterministic in content, and a fill racing an invalidation gives bounded staleness, not atomicity — see
   [read path](docs/ARCHITECTURE.md#read-path).
 - Webhook v2 deliberately processes one entity at a time for precise progress and Stop behavior.
   Failed IDs are reported in `incomplete` for targeted retries; see [the job API](docs/API.md).
@@ -167,7 +181,7 @@ scan.
 | Document | What's in it |
 |---|---|
 | [docs/REDIS-SCHEMA.md](docs/REDIS-SCHEMA.md) | Key formats and both invalidation paths — the contract every service shares |
-| [docs/API.md](docs/API.md) | Endpoint contracts for all three services |
+| [docs/API.md](docs/API.md) | Endpoint contracts for all four services |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Why the services are split this way |
 | [docs/BENCHMARK-BASELINE.md](docs/BENCHMARK-BASELINE.md) | Reference measurements and method |
 | [docs/run-index.jpg](docs/run-index.jpg) · [docs/run-legacy.jpg](docs/run-legacy.jpg) | Live browser captures with the default 2M fixture |
@@ -186,6 +200,8 @@ webhook job to reach `done`, then asserts:
 - every cache key **and** index key for the 1000 batch users is gone,
 - an untouched control user still has its cache,
 - `DBSIZE` dropped by exactly the number of keys those users owned,
+- a bulk-seeded user, invalidated and refilled through `test-api → mock-billing`, stores values
+  byte-identical to the bulk seed,
 
 and `docker compose down -v` afterwards. It exits non-zero on any failure.
 

@@ -30,6 +30,14 @@ and it is the reason you cannot reconstruct a key name from a user ID alone.
 
 Each user has **1 to 3 variants**, chosen deterministically from the seed (see below).
 
+**Adding `mock-billing` (US-011) changed nothing in this grammar.** It is a fourth service, but it
+never touches Redis, so it has no key segment of its own. `service` is still `test-api`, which is now
+literally the only service writing cache keys through `@Cache`, and `params` is still `{"v":N}`.
+`test-api` builds `SubscriptionParams` from `v` alone, so no query parameter it receives, and nothing
+from `mock-billing`'s snake_case envelope, can ever reach a key. The value is still the same JSON
+record in the same key order, serialised by `packages/fixture`'s `serializeSubscription`, whether
+the bulk seeder wrote it or a fill through `test-api → mock-billing` did.
+
 ## The index (Redis sets)
 
 ```
