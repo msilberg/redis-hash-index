@@ -20,6 +20,7 @@ succeeded rather than assuming it did.
 | [US-008](US-008.md) | End-to-end verification and README |
 | [US-010](US-010.md) | Cache strategies, the `@Cache` adapter, and a lazily-filled fixture |
 | [US-009](US-009.md) | test-api read path — the read-through route and the interleaving test |
+| [US-011](US-011.md) | mock-billing service, the S2S read chain, and no `return await` |
 
 ## Working rules for every story
 

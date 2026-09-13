@@ -192,6 +192,34 @@
       "priority": 10,
       "passes": true,
       "notes": "Full specification: tasks/US-009.md. Depends on US-010 (the cache API)."
+    },
+    {
+      "id": "US-011",
+      "title": "mock-billing service, the S2S read chain, and no return await",
+      "description": "As a reader of the demo, I need the third party to be a real service behind a network hop, so the cache sits in front of something that can be slow, fail, and speak someone else's schema.",
+      "acceptanceCriteria": [
+        "services/mock-billing exists as a fourth workspace on port 3003 with its own Dockerfile, compose service and healthcheck",
+        "It exposes GET /health returning {ok:true,seedValue} and GET /subscription/:userId?v=n returning a snake_case Chargebee-shaped envelope; 404 for an absent variant, 503 for ORIGIN_FAIL_USER, 400 for a userId not matching ^u_\\d{7}$",
+        "Every field of the envelope derives from @redis-hash-index/fixture's deterministic generator; the same userId, SEED_VALUE and variant always produce the same envelope",
+        "mock-billing does not depend on @redis-hash-index/cache and never opens a Redis connection",
+        "packages/fixture contains only prng, fixture, schema and its index; billing-provider.ts moved to mock-billing and subscription-service.ts moved to test-api; packages/fixture no longer imports @redis-hash-index/cache",
+        "packages/fixture exports one serializeSubscription() used by BOTH the bulk seeder and test-api's mapper, so bulk and lazy values are byte-identical",
+        "test-api gains src/billing-client.ts: an S2S client with an AbortController timeout (BILLING_TIMEOUT_MS, default 5000) that maps the envelope to the internal Subscription, turns every non-2xx, timeout, parse failure and connection refusal into OriginError, and maps 404 to null",
+        "test-api owns src/subscription-service.ts with @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE); it takes SubscriptionOrigin by constructor so tests inject a stub and open no socket",
+        "GET /subscription/u_XXXXXXX?v=n reaches getActiveSubscription(userId,{v:n}) and produces a cache key byte-identical to the bulk seeder's for that record; query parameters outside the key contract never enter the params segment",
+        "An OriginError is never cached and the route answers 502; a 404-derived null is not cached; test-api still never calls KEYS or SCAN",
+        "The benchmark's lazy and lazy-warm phases fill by calling test-api over HTTP (GET {TEST_API_URL}/subscription/:userId?v=n) with LAZY_CONCURRENCY, and no longer construct a SubscriptionService in process",
+        "Bulk seeding is unchanged and `make up` still writes 2,000,000 records in about a minute; ORIGIN_LATENCY_MS and ORIGIN_FAIL_USER are removed from the benchmark service and set on mock-billing",
+        "Before its first lazy request the seeder compares mock-billing's /health seedValue with its own and refuses the seed, naming both values, when they differ",
+        "docker-compose orders startup: test-api depends on mock-billing healthy; benchmark depends on test-api and mock-billing healthy",
+        "`grep -rn 'return await' packages services` matches only the try/finally in packages/cache/src/index.test.ts; functions left with no await are no longer async",
+        "docs/ARCHITECTURE.md, docs/API.md, docs/REDIS-SCHEMA.md, README.md and .env.example reflect the fourth service, the fill chain and the new variables",
+        "A test seeds one user in bulk, invalidates it, refills it through the chain, and asserts the stored string is byte-identical to the bulk value",
+        "`make typecheck && make test && make verify` exit 0"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": "Full specification: tasks/US-011.md"
     }
   ]
 }
