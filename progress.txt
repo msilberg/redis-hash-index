@@ -15,6 +15,16 @@ Started: (not yet run)
   software rendering. Chrome's accelerated canvas failed to display the chart on this machine;
   switching the context restored full redraws. Verify canvas changes visually in Chrome.
 
+- `@Cache` resolves its strategies from a module-level registry at CALL time: every process that
+  calls a decorated method (service bootstrap, each test file) must `configureCache(...)` first, or
+  the call throws. The decorator builds keys from arguments — call `(userId, { v: N })` for the
+  fixture's `{"v":N}` records.
+- The fixture has two writers that must agree byte-for-byte: bulk (`registerMany` pipelines) and
+  `@Cache` over the mock `BillingProvider`. Both build records via `fixture.recordsFor`. Any change
+  to the generator must keep `seeder.test.ts`'s bulk-vs-lazy snapshot test green.
+- Grep self-checks that forbid a name will still match the story spec describing it (`tasks/US-XXX.md`,
+  prd.json AC text). Don't rewrite specs to satisfy a grep; report the residual matches.
+
 Seeded from the specification before the first iteration. Add to this section whenever you learn
 something general and reusable — not story-specific details.
 
@@ -501,4 +511,67 @@ something general and reusable — not story-specific details.
   - Concurrent workers must await a reply into a local variable before updating shared counters;
     counter += await operation() can overwrite another worker's update.
   - Browser screenshots arrive as JPEG bytes; preserve .jpg filenames rather than assuming PNG.
+---
+
+## 2026-09-13 - US-010
+- Branch: fast-forwarded `ralph/redis-hash-index-demo` to `spec/us-009-us-010` (which held the new
+  specs; ralph was its ancestor), then worked there.
+- `packages/cache` split into `redis.ts` (narrow client, now incl. `get`/`set EX`), `keys.ts`
+  (segment/TTL validation, chunk), `strategies/default.ts` (`DefaultCacheStrategy`: protected
+  readonly client, `get`, `set` validating TTL first), `strategies/entity-index.ts`
+  (`EntityIndexCacheStrategy extends DefaultCacheStrategy`, `set` override: foreign category →
+  `super.set`, owned → `registerMany` single MULTI, with the why-comment), `cache-decorator.ts`
+  (`CacheKey`/`TTL`/`CacheStrategy` enums, `configureCache`, `getCacheStrategy`,
+  `resetCacheConfiguration`, `canonicalJson`, `buildCacheKey`, `@Cache` standard decorator with
+  single-flight, never caching rejections/undefined, `null` only under `cacheNegative`).
+  `index.ts` is now a barrel. Renamed `EntityIndex` → `EntityIndexCacheStrategy` everywhere, no alias.
+- `services/benchmark`: `billing-provider.ts` (deterministic mock, `ORIGIN_LATENCY_MS`,
+  `ORIGIN_FAIL_USER` → `OriginError`, no Redis), `subscription-service.ts` (the decorated method),
+  `fixture.ts` gained `recordsFor`/`recordOrdinalFor` + `generateUsers(..., fromUser)` (output proven
+  byte-identical to the old generator). Seeder: `SEED_MODE` bulk|lazy, `LAZY_CONCURRENCY`,
+  `LAZY_MAX_KEYS` refusal (`SeedRefusedError` → 400, before any flush), then a `lazy-warm` phase over
+  users 0..LAZY_WARM_USERS-1 (bulk skips them so they really go through `@Cache`). Origin failures
+  skip the record and shrink the expected DBSIZE; any other error aborts. Status/marker/frames carry
+  `seedMode`, `phase`, `originFailures`. `POST /api/seed` accepts optional `{seedMode, seedKeys}`;
+  `scripts/seed.mjs` forwards `SEED_MODE`/`SEED_KEYS` from the shell so
+  `SEED_MODE=lazy SEED_KEYS=50000 make reset seed` works without recreating the container.
+- compose forwards the six new env vars. Docs: ARCHITECTURE "Cache strategies", REDIS-SCHEMA
+  (rename, CacheKey = category), API (seed body + status fields), README seeding env table.
+- `scripts/verify.mjs` was ALREADY broken on this branch: commit 24a47d0 renamed test-api's
+  `/entitlement/:userId` to `/subscription/:userId` but verify still called `/entitlement` (404).
+  Pointed verify at `/subscription/`. **US-009 conflict to resolve**: its spec says
+  `GET /entitlement/:userId` is unchanged and `/subscription/:userId` is a NEW read-through route —
+  but that path is now the SMEMBERS+MGET reader, and docs/API.md still documents `/entitlement`.
+- Files changed: packages/cache/src/{index,redis,keys,cache-decorator,cache-decorator.test,
+  index.test}.ts, packages/cache/src/strategies/{default,entity-index}.ts, packages/cache/CLAUDE.md,
+  services/benchmark/src/{billing-provider,billing-provider.test,subscription-service,fixture,config,
+  seeder,seeder.test,runner.test,app,index}.ts, services/{test-api,webhook}/src/{controller,app.test}.ts,
+  services/CLAUDE.md, docker-compose.yml, scripts/{seed,verify}.mjs, README.md,
+  docs/{API,ARCHITECTURE,REDIS-SCHEMA}.md, tasks/US-002.md, prd.json, progress.txt.
+- Self-check executed:
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, test-api 4, webhook 6, benchmark 33.
+  - `make up` (default 2M): exit 0, seeded 2,999,196 keys in 53s; logs show
+    `seed phase bulk: 999000 users` then `seed phase lazy-warm: 1000 users through @Cache`.
+  - Decorator in the container (ORIGIN latency 150): miss 181 ms originCalls=1, hit 1.7 ms
+    originCalls=1; value + index member written, TTL 3600.
+  - `ORIGIN_FAIL_USER=u_0000002 docker compose up -d benchmark` + reseed (50k): scan `*u_0000002*`
+    empty, status `originFailures:1`, DBSIZE 74960 (= 49960 + 24999 + marker); two direct calls both
+    reject and still no keys.
+  - Bulk vs lazy at SEED_KEYS=50000: both DBSIZE 74962, identical sha256 over all 74,961 keys+values
+    (`70a1a08f89647c82`), sampled bulk-phase and warm-phase values identical, TTLs 3595–3600. Lazy
+    seed took ~5s.
+  - `SEED_MODE=lazy SEED_KEYS=2000000 make seed` → 400 naming `LAZY_MAX_KEYS=50000`, fixture untouched.
+  - `grep experimentalDecorators|reflect-metadata` → only prd.json's AC text. `grep \bEntityIndex\b`
+    → only the US-010 spec (tasks/US-010.md) and its prd.json AC line, which describe the rename.
+  - `make verify` → VERIFY OK, exit 0 (after the /subscription fix above); v2 removed 2011, DBSIZE
+    drop 3011 exact — the evicted users were the lazy-warm ones.
+- **Learnings for future iterations:**
+  - tsx (esbuild 0.28) and tsc 5.9 both lower standard decorators under the existing tsconfig — no
+    config change needed. `ClassMethodDecoratorContext` types come with lib ES2022.
+  - Bulk-seeding the warm users and then "lazy-warming" them would be all cache hits: skip them in
+    the main phase so the decorator actually fills them.
+  - Env vars on the host reach the container only at `up`; `make seed` runs on the host, hence the
+    POST body overrides.
+  - A lazy worker pool must stop sibling workers after a fatal error, or they keep writing into a
+    seed already marked failed.
 ---
