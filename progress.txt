@@ -33,6 +33,16 @@ Started: (not yet run)
 - test-api has two routes that must stay distinct: `/entitlement` (SMEMBERS+MGET bystander, polled by
   the runner and verify) and `/subscription` (the `@Cache` read-through).
 
+- The fill chain is benchmark → test-api → mock-billing, all HTTP. benchmark's `Seeder` takes a
+  `LazyFiller` (`TestApiFiller` in prod; tests inject an in-process fake). `seeder.start()` is ASYNC
+  (seed-value check first) — attach `once(seeder,"done")` before `await seeder.start()`.
+- A new workspace must be added to EVERY Dockerfile's build stage as `COPY <ws>/package.json`, or
+  `npm ci` in the other images fails against the lockfile.
+- Compare expiries with `PEXPIRETIME` (absolute), not two `PTTL` reads — sequential PTTLs drift by a
+  millisecond and flake "index outlives value" assertions.
+- `tsc` never deletes stale `dist/` files: after moving a module out of a package, `rm -rf dist`, or
+  consumers still resolve the old export locally (Docker builds are clean and won't show it).
+
 Seeded from the specification before the first iteration. Add to this section whenever you learn
 something general and reusable — not story-specific details.
 
@@ -628,4 +638,70 @@ something general and reusable — not story-specific details.
   - Spec self-checks written against an empty keyspace can be false on the seeded 2M fixture; prove
     "wrote nothing" as before == after, or clear the entity first.
   - README's docs table still says "the eight build stories" — stale but untouched.
+---
+
+## 2026-09-13 - US-011
+- New workspace `services/mock-billing` (:3003, Dockerfile, compose + healthcheck): `git mv`'d
+  `billing-provider.ts` (+test) → `src/provider.ts`; `src/envelope.ts` builds the snake_case envelope
+  (`sub_<id>_<v>`, `cus_<id>`, `current_term_end` = midnight UTC of `renewsAt`); `app.ts` = `/health`
+  `{ok,seedValue}` + `/subscription/:userId?v=` (400 bad id/v, 404 absent variant, 503 fail user;
+  `include_addons` accepted and ignored). Depends on fixture + express only. Env PORT, SEED_VALUE,
+  ORIGIN_LATENCY_MS, ORIGIN_FAIL_USER (moved here from test-api/benchmark).
+- `packages/fixture`: now prng/fixture/schema/index only, no cache dependency. `Subscription` type in
+  schema.ts; `serializeSubscription()` in fixture.ts, used by `recordsFor` (bulk) and test-api's mapper.
+- test-api: `src/subscription-service.ts` (moved; `SubscriptionParams = {v?}` only — `includeAddons`
+  dropped from the key contract), `src/billing-client.ts` (`BillingClient`, `OriginError`,
+  `toSubscription` normalising through `serializeSubscription`), config MOCK_BILLING_URL /
+  BILLING_TIMEOUT_MS. Route copies only `v` from the query. Probe uses `.finally()` instead of
+  try/return-await.
+- benchmark: `src/lazy-filler.ts` (`TestApiFiller`, `OriginFailedError` for a test-api 502); seeder
+  `LazyFiller {originSeedValue, fill}`; `start()` async, refuses (`SeedRefusedError` → 400, state
+  restored, nothing flushed) when mock-billing's seedValue differs or is unreachable — only if a lazy
+  request would happen. No `configureCache`/`SubscriptionService` in benchmark any more.
+- `return await` removed: `DefaultCacheStrategy.get`, decorator (pending join; the try/finally around
+  `load` became `.finally()` on the promise — wrapper stays `async` so sync throws still reject),
+  decorator test methods, subscription service, seeder.test `seedWith`, controller probe.
+- Tests: `billing-client.test.ts` (map, 404→null, non-2xx, header+body timeout, bad JSON/envelope,
+  ECONNREFUSED), `chain.test.ts` (DB 13; spawns mock-billing: bulk-write u_0000004's 3 records,
+  invalidate, refill via route with stray query params, byte-identical values/TTL/index; 404 null not
+  cached; 503 → 502 nothing cached), mock-billing app/provider tests, `lazy-filler.test.ts`, seeder
+  seed-value refusal (unit + HTTP 400). read-path.test now uses a fixture stub origin and v=1/v=2 on
+  u_0000004. `make verify` gained step 6: invalidate a bulk-phase user and refill through the chain,
+  byte compare.
+- Docs: ARCHITECTURE (new diagram, only-writer, why fixture stays shared, read-path mapping), API
+  (mock-billing routes + envelope, test-api mapping table, seed 400), REDIS-SCHEMA (grammar unchanged,
+  said explicitly), README (diagram, chain, env table with service column, ports), .env.example,
+  services/CLAUDE.md, packages/fixture/CLAUDE.md, root CLAUDE.md/AGENTS.md/prompt.md "four services".
+- Self-check executed:
+  - `grep -rn "return await" --include=*.ts packages services` → only index.test.ts:291.
+  - `grep -rn "ioredis\|redis" services/mock-billing/src` → 4 matches, ALL the
+    `@redis-hash-index/fixture` import lines (package scope contains "redis"); excluding those → none.
+    `npm ls ioredis --workspace mock-billing` → empty. Reported, not worked around.
+  - `grep -rn "@redis-hash-index/cache" packages/fixture services/mock-billing` → no matches.
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 7, mock-billing 7, test-api 17,
+    webhook 6, benchmark 28 (101).
+  - Mutations: mapper without serializeSubscription (key order changed) → chain test fails "refilled …
+    differs"; raw query merged into params → 1 fail. Restored → green.
+  - `make up` exit 0: five containers healthy, 2,999,196 keys seeded in 59 s, lazy-warm "through test-api".
+  - `curl :3003/health` → `{"ok":true,"seedValue":1}`; `:3003/subscription/u_0000001?v=1` → envelope;
+    `?v=2` → 404; `/bogus` → 400; `:3001/subscription/u_0000001?v=1` → source cache, value equals Redis.
+  - `docker compose stop mock-billing`: u_0000001 v1 still "cache"; `/subscription/u_0500000` → 502
+    (ENOTFOUND), DBSIZE 2999197 before and after, index members unchanged, `…::{}` absent. Restarted.
+  - `SEED_VALUE=2 docker compose up -d mock-billing && SEED_VALUE=1 make reset seed` → "POST /api/seed ->
+    400: refusing to seed: mock-billing SEED_VALUE=2 differs from benchmark SEED_VALUE=1 …", exit non-zero.
+  - Bulk vs lazy at 50k through docker: both DBSIZE 74962, identical sha256 over all 74,961 keys+values
+    (`d689487b17be930c`), same sampled value. Lazy seed now ~48 s (was ~5 s in-process: two HTTP hops).
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact; u_0012500's 2 values
+    refilled through the chain byte-identical).
+  - A later `make test` run failed once: read-path "index PTTL 3599996 < value PTTL 3599997" — two
+    sequential PTTL reads. Pre-existing flake from US-009; switched to PEXPIRETIME, 8/8 reruns + full
+    `make test` green.
+- **Learnings for future iterations:**
+  - Removing `return await` from a try/finally is not mechanical: the decorator's single-flight
+    cleanup would have run immediately. Chain `.finally()` onto the promise instead.
+  - The spec's mismatch self-check does `make reset` first, so a refusal there leaves an empty DB; the
+    refusal itself never flushes (tested with a seeded fixture).
+  - A container stopped by compose loses its DNS name: test-api sees ENOTFOUND, not ECONNREFUSED, and
+    the lookup takes ~3 s before the 502.
+  - README still says "the eight build stories" — stale, untouched.
 ---
