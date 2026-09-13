@@ -20,8 +20,8 @@ Started: (not yet run)
   the call throws. The decorator builds keys from arguments — call `(userId, { v: N })` for the
   fixture's `{"v":N}` records.
 - The fixture has two writers that must agree byte-for-byte: bulk (`registerMany` pipelines) and
-  `@Cache` over the mock `BillingProvider`. Both build records via `fixture.recordsFor`. Any change
-  to the generator must keep `seeder.test.ts`'s bulk-vs-lazy snapshot test green.
+  test-api's `@Cache` filling from mock-billing. Both build records via `fixture.recordsFor` and
+  serialise via `serializeSubscription`. Keep test-api's `chain.test.ts` and `make verify` step 6 green.
 - Grep self-checks that forbid a name will still match the story spec describing it (`tasks/US-XXX.md`,
   prd.json AC text). Don't rewrite specs to satisfy a grep; report the residual matches.
 
