@@ -148,26 +148,50 @@
       "notes": "Full specification: tasks/US-008.md"
     },
     {
+      "id": "US-010",
+      "title": "Cache strategies, the @Cache adapter, and a lazily-filled fixture",
+      "description": "As a developer, I need the cache reached through a @Cache decorator over a strategy hierarchy, so a service caches a method by annotating it and never builds a key by hand.",
+      "acceptanceCriteria": [
+        "packages/cache exports DefaultCacheStrategy with a protected readonly RedisClient shared with subclasses, and async get(key) / set(key,value,ttlSeconds); set validates the TTL before issuing any command",
+        "EntityIndex is renamed EntityIndexCacheStrategy everywhere (packages, services, tests, docs, prd.json) with NO compatibility alias; `grep -rn '\\bEntityIndex\\b'` finds no matches",
+        "EntityIndexCacheStrategy extends DefaultCacheStrategy and overrides set(): a key whose category it does not own falls back to super.set(); a key it owns goes through registerMany([{cacheKey,value,ttlSeconds}]) so SET EX and SADD are one MULTI, with a comment saying why super.set() is not called on that path",
+        "packages/cache exports enums CacheKey (values are the category segment), TTL (MEDIUM = 3600) and CacheStrategy (DEFAULT, ENTITY_INDEX_CACHE)",
+        "configureCache({redis,service,tenant,categories}) registers one instance per strategy; a decorated method called before configureCache throws a clear error and never silently bypasses the cache",
+        "@Cache(cacheKey, ttl, strategy) is a standard TypeScript 5 decorator; experimentalDecorators and reflect-metadata are NOT used",
+        "The decorator builds service::tenant::category::entityId::params from the first argument and a canonical sorted-key JSON of the rest, and the key round-trips through parse() unchanged",
+        "On a hit the underlying method is not called; on a miss the result is written via strategy.set()",
+        "Concurrent misses for the same key in one process collapse to a single underlying call (single-flight)",
+        "A method that throws is never cached and writes nothing; an undefined result is not cached; a null result is cached only under an explicit cacheNegative option that defaults to false",
+        "services/benchmark gains a deterministic BillingProvider mock producing exactly the fixture generator's record for a given userId, with ORIGIN_LATENCY_MS and ORIGIN_FAIL_USER, and it never touches Redis",
+        "A SubscriptionService method decorated @Cache(CacheKey.ACTIVE_SUBSCRIPTION, TTL.MEDIUM, CacheStrategy.ENTITY_INDEX_CACHE) calls BillingProvider.getActiveSubscription(userId)",
+        "SEED_MODE=bulk (default) keeps today's pipelined seeding; SEED_MODE=lazy fills every record through the decorator with LAZY_CONCURRENCY (default 16) and refuses above LAZY_MAX_KEYS (default 50000) with an error naming the flag",
+        "In both modes the seeder then lazily fills LAZY_WARM_USERS (default 1000) through the decorator as a reported 'lazy-warm' phase, targeting the same users the eviction batch uses",
+        "Seeding the same SEED_VALUE in bulk and in lazy produces the same DBSIZE and byte-identical values and TTLs for a sampled key",
+        "docs/ARCHITECTURE.md gains a 'cache strategies' section; docs/REDIS-SCHEMA.md and README.md reflect the rename and the new environment variables",
+        "`make up` still seeds 2,000,000 records in about a minute; `make typecheck && make test && make verify` exit 0"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Full specification: tasks/US-010.md. Lands before US-009."
+    },
+    {
       "id": "US-009",
       "title": "test-api read path \u2014 read-through cache, fake origin, interleaving test",
       "description": "As a reader of the write-up, I need the demo to fill the cache as well as evict it, so the fill-versus-invalidation race is demonstrable instead of only described.",
       "acceptanceCriteria": [
-        "packages/cache exports readThrough() and a @Cached standard decorator built on it; experimentalDecorators and reflect-metadata are NOT used",
-        "The cache key is built from service, tenant, category, entityId and a canonical (sorted-key) serialisation of the parameters, and round-trips through parse() unchanged",
-        "A miss writes through registerMany([{cacheKey,value,ttlSeconds}]), so SET EX and SADD are in one transaction",
-        "Concurrent misses for the same cache key in one process collapse to a single loader call (single-flight)",
-        "A loader that throws is propagated and NOTHING is written to Redis \u2014 no value, no index member",
-        "An authoritative negative result is cached only under cacheNegative:true (default false) with its own negativeTtlSeconds",
-        "test-api gains a deterministic fake BillingOrigin with ORIGIN_LATENCY_MS (default 150) and ORIGIN_FAIL_USER",
-        "GET /subscription/:userId returns {userId,source:'cache'|'origin',variants,latencyMs,subscription}; originMs is present when source is 'origin'; a failing origin returns 502",
+        "test-api gains GET /subscription/:userId returning {userId,source:'cache'|'origin',variants,latencyMs,subscription}; originMs is present when source is 'origin'",
+        "The route reads and fills through US-010's @Cache decorator; no second decorator or standalone readThrough() is introduced",
+        "A failing origin returns 502 and NOTHING is written to Redis \u2014 no value, no index member",
         "GET /entitlement/:userId is unchanged; test-api still never calls KEYS or SCAN",
-        "An integration test asserts: a fill in flight across an invalidation leaves value and reference consistent and the value surviving to its TTL; an invalidation after the fill removes both; an origin error caches nothing and the next call still reaches the origin; 50 concurrent misses cause 1 loader call",
+        "An integration test asserts a fill in flight across an invalidation leaves value and reference consistent and the value surviving to its TTL",
+        "An integration test asserts an invalidation after a completed fill removes both value and reference",
+        "An integration test asserts an origin error caches nothing and the next call still reaches the origin",
         "docs/API.md, docs/ARCHITECTURE.md (a 'read path' section) and README.md are updated; ARCHITECTURE states the test demonstrates bounded staleness, not atomicity",
         "`make typecheck && make test` exit 0 and `make verify` still exits 0"
       ],
-      "priority": 9,
+      "priority": 10,
       "passes": false,
-      "notes": "Full specification: tasks/US-009.md"
+      "notes": "Full specification: tasks/US-009.md. Depends on US-010 (the cache API)."
     }
   ]
 }
