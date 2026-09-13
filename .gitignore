@@ -152,3 +152,5 @@ archive/
 dist/
 .env
 docs/run-*.png.tmp
+
+patch/
