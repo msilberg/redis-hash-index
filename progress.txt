@@ -110,6 +110,13 @@ something general and reusable — not story-specific details.
 - No browser tooling in this env: `docs/run-legacy.json` / `docs/run-index.json` are captured `/ws`
   frames, produced by `node scripts/capture-run.mjs <v1|v2> <seconds> <outfile>` against an up +
   seeded stack. README section 3 says so explicitly.
+- Read path (US-009): services fill the cache only through `packages/cache` `readThrough()` /
+  `@Cached` (standard decorators — never `experimentalDecorators`). A decorated method returns the
+  plain value; wrap the call in `captureReads()` to learn `source`/timings. The benchmark must keep
+  polling `GET /entitlement/:userId` (index only) — `/subscription` calls the origin and would
+  refill evicted users mid-run.
+- A new redis-touching test file in `packages/cache` needs its own DB: `index.test.ts` = 15,
+  `read-through.test.ts` = 14.
 
 ## 2026-09-09 - US-001
 - Scaffolded the workspace: root `package.json` (npm workspaces, private), `tsconfig.base.json`
@@ -501,4 +508,56 @@ something general and reusable — not story-specific details.
   - Concurrent workers must await a reply into a local variable before updating shared counters;
     counter += await operation() can overwrite another worker's update.
   - Browser screenshots arrive as JPEG bytes; preserve .jpg filenames rather than assuming PNG.
+---
+
+## 2026-09-13 - US-009
+- Implemented the read path.
+  - `packages/cache/src/read-through.ts` (re-exported from index): `ReadThroughCache` (service +
+    tenant, single-flight `Map` cleared in `finally`), `readThrough(cache, coords, policy, load)`,
+    the standard `@Cached({category, ttlSeconds, cacheNegative?, negativeTtlSeconds?})` decorator
+    (host exposes `cache`), `captureReads()` (AsyncLocalStorage) and `canonicalJson` (sorted keys
+    at every depth). `keyFor` builds the key and throws unless `parse` returns the same
+    coordinates. Miss → loader → `registerMany([{cacheKey,value,ttlSeconds}])`. Loader throw →
+    propagates, nothing written. `null` cached only under `cacheNegative`; `undefined` rejected.
+    TTLs validated before the origin is called. `assertValidTtl` is now exported from index.ts.
+  - `services/test-api`: `src/origin.ts` `BillingOrigin` (hashInt from SEED_VALUE, 1 user in 8
+    has no subscription, `ORIGIN_LATENCY_MS` 150 / `ORIGIN_FAIL_USER`), `src/subscription-reader.ts`
+    (`@Cached`, 3600s, negative 60s), `GET /subscription/:userId?includeAddons=` →
+    `{userId,source,variants(SCARD),latencyMs,originMs?,subscription}`, 502 on origin error.
+  - Restored `GET /entitlement/:userId`: commit 24a47d0 had renamed it to `/subscription` (test-api,
+    runner, runner.test), which the spec says must be unchanged and which `scripts/verify.mjs`
+    calls. Reverted that rename, then added `/subscription` as the new route.
+  - Compose passes `SEED_VALUE` / `ORIGIN_LATENCY_MS` / `ORIGIN_FAIL_USER` to test-api.
+  - Docs: API.md route + 502-writes-nothing, ARCHITECTURE.md "The read path" (bounded staleness,
+    not atomicity; generation numbers deliberately not implemented), REDIS-SCHEMA.md params note,
+    README caveat line.
+- Tests: `packages/cache/src/read-through.test.ts` (DB 14, 13 cases): key round-trip and
+  canonical order; hit/miss; origin error writes nothing and next call reaches origin; negative
+  default-off / opt-in TTL; undefined rejected; policy validated before origin; 50 concurrent
+  misses → 1 loader call and 1 write; mid-fill invalidation removes the older variant, the fill
+  lands with value+reference agreeing, stale value served from cache, both gone after the 2s TTL;
+  invalidation after fill removes both; `@Cached` + `captureReads` including concurrent capture.
+  test-api app.test.ts gained origin→cache, negative caching, 502-writes-nothing, 400 cases.
+- Files changed: packages/cache/src/{read-through,read-through.test,index}.ts,
+  packages/cache/CLAUDE.md, services/test-api/src/{origin,subscription-reader,controller,app,
+  config,index,app.test}.ts, services/benchmark/src/{runner,runner.test}.ts, services/CLAUDE.md,
+  docker-compose.yml, docs/{API,ARCHITECTURE,REDIS-SCHEMA}.md, README.md, prd.json, progress.txt.
+- Self-check executed: `make typecheck` exit 0; `make test` exit 0 (cache 32, test-api 8,
+  webhook 6, benchmark 24). `make up`: `/subscription/u_0000001?includeAddons=true` → source
+  origin, originMs 151, latencyMs 5.3; repeat → source cache (compiled tsc decorator output works
+  in the container). `ORIGIN_FAIL_USER=u_0000002 docker compose up -d test-api` → 502,
+  `redis-cli --scan --pattern '*u_0000002*'` → no output. `grep KEYS|scan( services/test-api/src`
+  → no matches. The decorator-flag grep matches only the acceptance-criteria text in prd.json
+  (with node_modules/dist excluded; unfiltered it would hit TypeScript's own lib files).
+  `make verify` → VERIFY OK, exit 0 (DBSIZE drop 3011 = expected).
+- **Learnings for future iterations:**
+  - Stayed on `patch/fixes-and-imrpovements` rather than the PRD's `ralph/redis-hash-index-demo`:
+    the US-009 spec and every later fix live only on the patch branch (ralph is 16 commits behind).
+  - Standard method decorators under tsc need `P extends object` for the params generic; a
+    `Record<string, unknown>` constraint rejects interface-typed params (TS1241/TS1270).
+  - The stack's fixture expires after 3600s but `seed::marker` has no TTL, so `make up` on an
+    old volume reports "already seeded" with no fixture keys left. Harmless for this story; reseed
+    (`make seed FORCE=1`) before benchmarking an old stack.
+  - The fake origin's negatives under SEED_VALUE 1 include u_0000000, u_0000015, u_0000016 — use
+    u_0000001/u_0000003 for positive-path checks.
 ---

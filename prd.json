@@ -166,7 +166,7 @@
         "`make typecheck && make test` exit 0 and `make verify` still exits 0"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-009.md"
     }
   ]
