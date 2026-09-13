@@ -1,15 +1,17 @@
 import express, { type Express } from "express";
-import { TestApiController, type RedisReader } from "./controller";
+import { TestApiController, type TestApiRedis } from "./controller";
+import type { BillingOrigin } from "./origin";
 
-export type { RedisReader } from "./controller";
+export type { TestApiRedis } from "./controller";
 
-export function createApp(redis: RedisReader): Express {
-  const controller = new TestApiController(redis);
+export function createApp(redis: TestApiRedis, origin: BillingOrigin): Express {
+  const controller = new TestApiController(redis, origin);
   const app = express();
   app.disable("x-powered-by");
 
   app.get("/health", controller.health);
-  app.get("/subscription/:userId", controller.getUserSubscription);
+  app.get("/entitlement/:userId", controller.getEntitlement);
+  app.get("/subscription/:userId", controller.getSubscription);
 
   return app;
 }

@@ -30,6 +30,10 @@ and it is the reason you cannot reconstruct a key name from a user ID alone.
 
 Each user has **1 to 3 variants**, chosen deterministically from the seed (see below).
 
+`test-api`'s read-through route (US-009) writes further records for the same user with a params
+tail such as `{"includeAddons":true}` — `JSON.stringify` over sorted keys, so equal params always
+build the same key. They are written with `registerMany` and indexed exactly like the fixture.
+
 ## The index (Redis sets)
 
 ```

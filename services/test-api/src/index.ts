@@ -1,6 +1,7 @@
 import Redis from "ioredis";
-import { createApp, type RedisReader } from "./app";
+import { createApp, type TestApiRedis } from "./app";
 import { loadConfig } from "./config";
+import { BillingOrigin } from "./origin";
 
 const config = loadConfig();
 
@@ -13,10 +14,16 @@ redis.on("error", (err: Error) => {
   console.error(`[test-api] redis error: ${err.message}`);
 });
 
-const app = createApp(redis as unknown as RedisReader);
+const origin = new BillingOrigin({
+  latencyMs: config.originLatencyMs,
+  seedValue: config.seedValue,
+  ...(config.originFailUser === undefined ? {} : { failUser: config.originFailUser }),
+});
+
+const app = createApp(redis as unknown as TestApiRedis, origin);
 
 const server = app.listen(config.port, () => {
-  console.log(`[test-api] listening on :${config.port}`);
+  console.log(`[test-api] listening on :${config.port} (origin latency ${config.originLatencyMs}ms)`);
 });
 
 function shutdown(signal: string): void {

@@ -26,6 +26,13 @@ Endpoints that read a JSON request body need `app.use(express.json())` (webhook 
 doesn't have a body). Fire long-running work with `void runJob(...)` and return `202` immediately —
 never `await` it in the handler.
 
+`test-api` has two reads: `GET /entitlement/:userId` (index only — the route the benchmark polls;
+never point the run driver at `/subscription`, or evicted users get refilled from the 150 ms
+origin mid-run) and `GET /subscription/:userId` (read-through via `@Cached` in
+`src/subscription-reader.ts`, fake `BillingOrigin` in `src/origin.ts`). `createApp(redis, origin)`
+takes the origin so tests can use a fast one. Its Redis type is `TestApiRedis`, which now includes
+`multi` for the fill.
+
 `test-api` must never enumerate the keyspace, so don't write `KEYS`/`scan(` even in its comments.
 `webhook`'s v1 path *is* the legacy scan — `redis.keys('*::<userId>::*')` is deliberate there.
 

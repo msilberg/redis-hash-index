@@ -343,7 +343,8 @@ function assertSegment(name: string, value: string): void {
   }
 }
 
-function assertValidTtl(ttlSeconds: number): void {
+/** Throws a RangeError unless `ttlSeconds` is a whole number in 1..2592000. */
+export function assertValidTtl(ttlSeconds: number): void {
   if (
     typeof ttlSeconds !== "number" ||
     !Number.isInteger(ttlSeconds) ||
@@ -362,3 +363,5 @@ function* chunk<T>(items: readonly T[], size: number): Generator<T[]> {
     yield items.slice(i, i + size);
   }
 }
+
+export * from "./read-through";

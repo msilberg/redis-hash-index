@@ -9,8 +9,8 @@
 // `ok:false` and the elapsed time — a gap in the chart during the worst moment would be the exact
 // opposite of the point.
 
-import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { randomBytes } from "node:crypto";
 
 import { userIdFor } from "./fixture";
 
@@ -238,7 +238,7 @@ export class Runner extends EventEmitter {
     let ok = false;
     let serverLatencyMs: number | null = null;
     try {
-      const res = await fetch(`${this.config.testApiBaseUrl}/subscription/${userId}`, {
+      const res = await fetch(`${this.config.testApiBaseUrl}/entitlement/${userId}`, {
         signal: AbortSignal.timeout(this.config.pollTimeoutMs),
       });
       latencyMs = Number(process.hrtime.bigint() - started) / 1e6;

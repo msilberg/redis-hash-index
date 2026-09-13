@@ -134,6 +134,9 @@ scan.
 - The seeder uses the shared transactional `registerMany()` writer. Pruning is available but
   not scheduled; fixture index sets expire after one hour. See the
   [registration and maintenance policy](docs/ARCHITECTURE.md#registration-and-maintenance-policy).
+- The demo now fills the cache as well as evicting it: `GET /subscription/:userId` on test-api is a
+  read-through in front of a **fake, deterministic** billing origin. See the
+  [read path](docs/ARCHITECTURE.md#the-read-path).
 - Webhook v2 deliberately processes one entity at a time for precise progress and Stop behavior.
   Failed IDs are reported in `incomplete` for targeted retries; see [the job API](docs/API.md).
 
@@ -147,7 +150,7 @@ scan.
 | [docs/BENCHMARK-BASELINE.md](docs/BENCHMARK-BASELINE.md) | Reference measurements and method |
 | [docs/run-index.jpg](docs/run-index.jpg) · [docs/run-legacy.jpg](docs/run-legacy.jpg) | Live browser captures with the default 2M fixture |
 | [docs/run-index.json](docs/run-index.json) · [docs/run-legacy.json](docs/run-legacy.json) | Captured WebSocket frames from each run |
-| [tasks/](tasks/) | The eight build stories, in full |
+| [tasks/](tasks/) | The build stories, in full |
 
 ## 8. Verify it yourself
 
@@ -187,7 +190,7 @@ when every story passes.
 |---|---|
 | `ralph.sh` | The loop. Requires `jq`. |
 | `CLAUDE.md` | Instructions handed to each iteration, plus this project's context |
-| `prd.json` | The eight stories, their acceptance criteria, and the `passes` flags |
+| `prd.json` | The stories, their acceptance criteria, and the `passes` flags |
 | `tasks/US-*.md` | Full specification and self-check for each story |
 | `progress.txt` | Append-only log, with a Codebase Patterns section iterations read first |
 

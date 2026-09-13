@@ -94,3 +94,61 @@ in `processed`, and finish as `failed` if any attempt failed. A stopped job stay
 retains failures already observed. Submit `incomplete.map(entry => entry.entityId)` as `userIds`
 to retry failures after resolving their cause. For stopped jobs, also resume the unattempted
 suffix of the original list starting at `processed`.
+
+## The read path
+
+Everything above treats the cache as already full. `GET /subscription/:userId` on test-api fills
+it: a read-through in front of a fake billing origin, built from `packages/cache`'s `readThrough()`
+and its standard (TC39) method decorator, `@Cached`.
+
+```ts
+@Cached({ category: CATEGORY, ttlSeconds: 3600, cacheNegative: true, negativeTtlSeconds: 60 })
+async getActiveSubscription(userId: string, params: SubscriptionParams) {
+  return await this.origin.getActiveSubscription(userId, params);
+}
+```
+
+**What the decorator hides.** The call site never mentions Redis. The key is
+`<service>::<tenant>::<category>::<entityId>::<params>`, and the params tail is a sorted-key
+JSON serialisation of the method's arguments. The framework builds it in one line, and nobody reads it.
+That is why the key is easy to build and hard to delete from: one day someone passes you a user ID
+and says "invalidate this". The params that produced each key are gone, so you cannot rebuild the
+names. You can only enumerate the keyspace (v1) or ask an index that recorded them (v2). The read
+path writes through `registerMany`, so every value it creates is recorded in the same transaction
+as its `SET EX`.
+
+**Errors are not answers.** A loader that throws propagates; nothing is written. A loader that
+resolves `null` is an authoritative "no", cached only under an explicit `cacheNegative` with its own
+TTL. A `catch` that returns `undefined` would merge these two cases into one and turn a transient
+provider blip into a cached "no subscription" for the whole TTL. `readThrough` rejects `undefined`
+for that reason. Concurrent misses for one key in one process share a single origin call
+(single-flight), so a warm-up loop against a slow origin cannot become a thundering herd.
+
+**What the interleaving test demonstrates — bounded staleness, not atomicity.**
+`packages/cache/src/read-through.test.ts` runs against real Redis and asserts the documented outcome
+of the race. It does not claim to fix it:
+
+- *Invalidation lands mid-fill.* A fill starts against an origin held open. The invalidation runs
+  and removes the value and reference that existed at that moment. The origin then answers with
+  what it read *before* the invalidation, and the fill writes it. The test asserts that the value and its
+  index reference agree (no orphan value, no dangling reference; `registerMany` buys that). It also
+  asserts that the stale value is still served from cache after the invalidation, and that it and
+  its reference are gone once the TTL has passed.
+- *Invalidation lands after the fill.* Value and reference are both gone; the next read reaches
+  the origin.
+- *Origin error.* The call rejects, no key and no index member exist, and the next call reaches
+  the origin again.
+- *Single-flight.* Fifty concurrent misses produce one loader call and one write.
+- *Key round-trip.* A key built by the wrapper parses back to the same coordinates.
+
+So an invalidation cannot stop a fill that began before it. A fill that read the origin before the
+change can still write afterwards, and that stale value lives until its TTL expires. The index keeps
+that value deletable by the *next* invalidation; it does not prevent the write. Closing the race needs
+a per-entity generation number: bump it on invalidation, and have the fill write only if the
+generation it read at the start is still current, checked in the same transaction. This demo
+deliberately does not do that. The TTL is the bound.
+
+The origin is fake and deterministic from `SEED_VALUE`: `ORIGIN_LATENCY_MS` (default 150) delays every
+answer, one user in eight has no subscription, and `ORIGIN_FAIL_USER` always throws. The seeder
+does not use the read path; it writes the fixture directly with `registerMany`. The benchmark polls
+`GET /entitlement/:userId`, which never calls the origin, so a run's graph is unaffected.
