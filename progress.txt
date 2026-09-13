@@ -25,6 +25,14 @@ Started: (not yet run)
 - Grep self-checks that forbid a name will still match the story spec describing it (`tasks/US-XXX.md`,
   prd.json AC text). Don't rewrite specs to satisfy a grep; report the residual matches.
 
+- npm runs workspace `prepare` scripts IN PARALLEL. A workspace package that compiles against another
+  workspace's `dist/` cannot use `prepare` — `packages/fixture` has none; `make packages` (a prereq of
+  typecheck/test) builds cache then fixture, and consuming Dockerfiles `RUN npm run build --workspace
+  @redis-hash-index/fixture` after `npm ci`. Local typecheck alone won't catch this — `make up` did.
+- Services share code through `packages/*`, never by importing another service's workspace.
+- test-api has two routes that must stay distinct: `/entitlement` (SMEMBERS+MGET bystander, polled by
+  the runner and verify) and `/subscription` (the `@Cache` read-through).
+
 Seeded from the specification before the first iteration. Add to this section whenever you learn
 something general and reusable — not story-specific details.
 
@@ -81,7 +89,7 @@ something general and reusable — not story-specific details.
 - benchmark service = Express app + `http.Server` + `ws` at `/ws`. `createApp({seeder})` returns the
   app; `attachWebSocket(server, seeder)` returns a hub with `broadcast` (US-006/007 reuse it).
 - The seeder is deterministic from `SEED_VALUE` (mulberry32 + an order-independent `hashInt`).
-  `services/benchmark/src/fixture.ts` is the single generator — changing it diverges every fixture.
+  `packages/fixture/src/fixture.ts` (was `services/benchmark/src/`) is the single generator — changing it diverges every fixture.
 - Seeder writes with `flushdb()` first, then asserts `DBSIZE === cacheKeys + indexKeys` BEFORE
   writing `seed::marker`. So live DBSIZE after a completed seed is that total **+ 1** (the marker).
 - `SEED_KEYS` counts cache *records*; users ≈ SEED_KEYS/2 (`averageVariants` = 2). Actual cacheKeys
@@ -574,4 +582,50 @@ something general and reusable — not story-specific details.
     POST body overrides.
   - A lazy worker pool must stop sibling workers after a fatal error, or they keep writing into a
     seed already marked failed.
+---
+
+## 2026-09-13 - US-009
+- Route conflict resolved: commit 24a47d0 had renamed test-api's SMEMBERS+MGET reader to
+  `/subscription`, but the spec, prd AC and docs/API.md keep it at `/entitlement` and reserve
+  `/subscription` for the read-through. Restored `/entitlement` (runner, runner.test fake, verify.mjs
+  point back to it) and made `/subscription` the new route.
+- New workspace `packages/fixture`: `git mv`'d prng, fixture, billing-provider (+tests) and
+  subscription-service out of benchmark, plus `schema.ts` (TENANT/CATEGORY/SERVICE/PLAN_IDS/
+  AVERAGE_VARIANTS). benchmark `config.ts` re-exports TENANT/CATEGORY/SERVICE. `SubscriptionService`
+  now takes a `SubscriptionOrigin` interface; `SubscriptionParams` gained `includeAddons`.
+- test-api: `createApp(redis, origin)`; `index.ts` calls `configureCache` (service `test-api`, so fills
+  hit fixture keys) and builds `BillingProvider` from SEED_VALUE/ORIGIN_LATENCY_MS/ORIGIN_FAIL_USER
+  (forwarded by compose). `GET /subscription/:userId?includeAddons=&v=` → per-request
+  `SubscriptionService(probe)` to learn `source`/`originMs`; `latencyMs` = decorated call − origin +
+  the SMEMBERS+MGET variant read; 502 on origin error; 400 on bad id/query.
+- `src/read-path.test.ts` (DB 14): gated-origin fill across `invalidateEntities` → invalidation removed
+  the earlier variant, late fill lands value+reference (DBSIZE 2, SMEMBERS = [fillKey]), PTTL ≈ 3600 s,
+  index TTL ≥ value TTL, served from cache, next invalidation removes it; invalidation after a completed
+  fill removes both, next read hits origin; origin error → 502 twice, DBSIZE 0, origin called twice.
+- Makefile `packages` target; Dockerfiles copy/build packages/fixture; docs API/ARCHITECTURE ("Read
+  path")/README caveat + env note; packages/fixture/CLAUDE.md; services/CLAUDE.md test-api section.
+- Self-check executed:
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 10, test-api 8, webhook 6,
+    benchmark 23 (83; benchmark's 10 pure tests moved to fixture).
+  - Mutation: decorator strategy → DEFAULT made both fill/invalidation tests fail; restored → 8/8.
+  - First `make up` FAILED (fixture `prepare` raced cache's in `npm ci`); fixed as above. Second
+    `make up` exit 0, seeded 2,999,196 keys in 53s (unchanged).
+  - `curl /subscription/u_0000001?includeAddons=true` → source origin, originMs 0.29; again → cache
+    (twice); `?v=1` → cache, same record as the fixture; index lists both keys; value TTL 3600;
+    `/entitlement/u_0000001` → hit; `/subscription/bogus` → 400.
+  - `ORIGIN_FAIL_USER=u_0000002 docker compose up -d test-api` → 502. The literal spec check
+    ("`--scan '*u_0000002*'` no output") does not hold on a seeded fixture: u_0000002 already had its
+    bulk-seeded value + index — identical before and after the 502s. After evicting it through webhook
+    v2, two more 502s → scan prints nothing.
+  - `grep -rn "KEYS\|scan(" services/test-api/src` → no matches. `grep experimentalDecorators|
+    reflect-metadata` (excluding node_modules) → only prd.json's US-010 AC text.
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact).
+  - Re-read ARCHITECTURE "Read path" against read-path.test.ts: every listed claim is an assertion;
+    it says explicitly the test checks the TTL is armed, not that it waits an hour.
+- **Learnings for future iterations:**
+  - `@Cache`'s single-flight map is per decorated method (closure at decoration), not per instance, so
+    constructing a decorated service per request keeps single-flight and lets you wrap the origin.
+  - Spec self-checks written against an empty keyspace can be false on the seeded 2M fixture; prove
+    "wrote nothing" as before == after, or clear the entity first.
+  - README's docs table still says "the eight build stories" — stale but untouched.
 ---
