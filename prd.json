@@ -146,6 +146,28 @@
       "priority": 8,
       "passes": true,
       "notes": "Full specification: tasks/US-008.md"
+    },
+    {
+      "id": "US-009",
+      "title": "test-api read path \u2014 read-through cache, fake origin, interleaving test",
+      "description": "As a reader of the write-up, I need the demo to fill the cache as well as evict it, so the fill-versus-invalidation race is demonstrable instead of only described.",
+      "acceptanceCriteria": [
+        "packages/cache exports readThrough() and a @Cached standard decorator built on it; experimentalDecorators and reflect-metadata are NOT used",
+        "The cache key is built from service, tenant, category, entityId and a canonical (sorted-key) serialisation of the parameters, and round-trips through parse() unchanged",
+        "A miss writes through registerMany([{cacheKey,value,ttlSeconds}]), so SET EX and SADD are in one transaction",
+        "Concurrent misses for the same cache key in one process collapse to a single loader call (single-flight)",
+        "A loader that throws is propagated and NOTHING is written to Redis \u2014 no value, no index member",
+        "An authoritative negative result is cached only under cacheNegative:true (default false) with its own negativeTtlSeconds",
+        "test-api gains a deterministic fake BillingOrigin with ORIGIN_LATENCY_MS (default 150) and ORIGIN_FAIL_USER",
+        "GET /subscription/:userId returns {userId,source:'cache'|'origin',variants,latencyMs,subscription}; originMs is present when source is 'origin'; a failing origin returns 502",
+        "GET /entitlement/:userId is unchanged; test-api still never calls KEYS or SCAN",
+        "An integration test asserts: a fill in flight across an invalidation leaves value and reference consistent and the value surviving to its TTL; an invalidation after the fill removes both; an origin error caches nothing and the next call still reaches the origin; 50 concurrent misses cause 1 loader call",
+        "docs/API.md, docs/ARCHITECTURE.md (a 'read path' section) and README.md are updated; ARCHITECTURE states the test demonstrates bounded staleness, not atomicity",
+        "`make typecheck && make test` exit 0 and `make verify` still exits 0"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "Full specification: tasks/US-009.md"
     }
   ]
 }
