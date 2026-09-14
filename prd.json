@@ -220,6 +220,33 @@
       "priority": 11,
       "passes": true,
       "notes": "Full specification: tasks/US-011.md"
+    },
+    {
+      "id": "US-012",
+      "title": "Retire /entitlement, and mark the end of the eviction on the chart",
+      "description": "As a reader of the demo, I need one endpoint per entity and a chart that shows when the eviction finished, not only when it started.",
+      "acceptanceCriteria": [
+        "GET /entitlement/:userId, its controller handler, its tests and its docs/API.md section are deleted; the internal SMEMBERS+MGET read survives under a name that says what it is",
+        "GET /subscription/:userId?fill=false reads the cache without filling it: 200 {userId,source:'cache'|'miss',hit,variants,latencyMs}, no origin call, no scan fallback; fill defaults to true and today's read-through behaviour is unchanged",
+        "source:'miss' with hit:false and variants:0 is a 200, not an error \u2014 it is the expected state after an eviction; ?v= is ignored in this mode rather than rejected",
+        "services/benchmark/src/runner.ts and scripts/verify.mjs both poll GET {TEST_API_URL}/subscription/:userId?fill=false",
+        "A test evicts a user, calls the probe repeatedly against the empty cache, and asserts DBSIZE is unchanged and no key or index member was created",
+        "Stale /entitlement wording is removed from services/CLAUDE.md and from prd.json's US-003 and US-009 criteria, without changing those stories' passes flags",
+        "RunJobCounters carries the webhook job's finishedAt, and the runner emits exactly one batch-completed frame per run when a poll first observes a terminal state",
+        "The batch-completed frame carries {t,runId,mode,ts,elapsedSec,state,processed,removed,incomplete} with elapsedSec fractional to 3 decimals, derived from finishedAt and the run's startedAt",
+        "The batch-dispatched frame's elapsedSec becomes fractional too, so a fast v2 completion can never render before its dispatch; sample frames keep rounded elapsedSec",
+        "Polling continues after completion; the run does not auto-stop",
+        "The chart draws a second dashed full-height marker coloured by terminal state: green for done, amber for stopped, red for failed",
+        "Its label names the state and the counters: 'eviction completed (N users, M keys)', 'eviction stopped after N of M', 'eviction failed \u2014 N entities incomplete'",
+        "When the two markers are closer than the first label's width, the second label is drawn on a second row and right-aligned if it would overflow the plot",
+        "The chart has a legend covering both markers",
+        "HistoryFrame and ActiveRun carry the completion, so a browser connecting or reloading mid-run redraws both markers; the UI clears them on run-started",
+        "docs/API.md documents the batch-completed frame; README.md says the two v2 lines nearly coincide and that a v1 run normally shows the amber stopped line",
+        "`make typecheck && make test && make verify` exit 0"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": "Full specification: tasks/US-012.md"
     }
   ]
 }
