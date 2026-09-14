@@ -30,8 +30,13 @@ Started: (not yet run)
   typecheck/test) builds cache then fixture, and consuming Dockerfiles `RUN npm run build --workspace
   @redis-hash-index/fixture` after `npm ci`. Local typecheck alone won't catch this — `make up` did.
 - Services share code through `packages/*`, never by importing another service's workspace.
-- test-api has two routes that must stay distinct: `/entitlement` (SMEMBERS+MGET bystander, polled by
-  the runner and verify) and `/subscription` (the `@Cache` read-through).
+- test-api has ONE route, `/subscription/:userId`, in two modes that must stay distinct: the default
+  `@Cache` read-through, and `?fill=false` (SMEMBERS+MGET probe, polled by the runner and verify) which
+  must never fill — a filling probe refills what an eviction removes. (`/entitlement` retired in US-012.)
+- UI changes CAN be verified in a browser here: `google-chrome --headless=new --screenshot=… --window-size=1400,1000
+  --virtual-time-budget=5000 http://localhost:3000/` for a mid-run page (history frame). To capture a state
+  that only a live page sees (e.g. after Stop), drive Chrome over CDP (`--remote-debugging-port`, Node's
+  global WebSocket, `Page.captureScreenshot`), then Read the PNG.
 
 - The fill chain is benchmark → test-api → mock-billing, all HTTP. benchmark's `Seeder` takes a
   `LazyFiller` (`TestApiFiller` in prod; tests inject an in-process fake). `seeder.start()` is ASYNC
@@ -703,5 +708,59 @@ something general and reusable — not story-specific details.
     refusal itself never flushes (tested with a seeded fixture).
   - A container stopped by compose loses its DNS name: test-api sees ENOTFOUND, not ECONNREFUSED, and
     the lookup takes ~3 s before the 502.
+  - README still says "the eight build stories" — stale, untouched.
+---
+
+## 2026-09-14 - US-012
+- test-api: `/entitlement` route, handler and its three tests deleted. `GET /subscription/:userId?fill=false`
+  → `{userId, source:"cache"|"miss", hit, variants, latencyMs}` via `readCachedVariants` (renamed from
+  `readEntitlement`, still used by the fill path). `fill` other than true/false → 400; `?v=` ignored in probe
+  mode. New app tests (hit, 200 miss, ?v= ignored, 400s) and read-path test "the ?fill=false probe writes
+  nothing" (working origin, evicts u_0000004, 5 probes, DBSIZE/index/values/origin calls unchanged, then a
+  control fill proves the test can fail).
+- runner: poll URL `?fill=false`; `RunJobCounters` + `incomplete` (count) + `finishedAt`; `BatchCompletedFrame`
+  (`total` added beside the spec's fields — the "stopped after N of M" label needs it); `observeCompletion`
+  (sync, once per run, only when terminal AND `finishedAt` parses); `stop()` → `awaitCompletion` (re-reads
+  the job every 100 ms up to `pollTimeoutMs`) so a UI Stop still yields the amber line, emitted before
+  `run-stopped`; `markerSec` fractional for `batch` and `batch-completed`; `HistoryFrame` gains
+  `completedAt`, `completionState`, `completion`.
+- UI: `C_DONE/C_STOPPED/C_FAILED`, `completionLabel`, second row at `padT + 16` when within the first
+  label's width, right-align on overflow, HTML `#marker-legend`, `newRun()` clears completion on
+  run-started, history restores it, `batch-completed` applied only to a matching runId and also updates
+  the status strip's job counters. Dispatch marker `C_BATCH` changed amber → grey (#9aa7b4): with
+  "stopped" amber by spec, two amber lines on a v1 run would be indistinguishable.
+- scripts: verify.mjs control check uses `?fill=false`; capture-run.mjs waits for `run-stopped` (≤35 s)
+  instead of a fixed 500 ms, or a v1 capture loses the completion frame.
+- Docs: API.md (probe section, `batch` + `batch-completed` + history shapes, stop semantics), README
+  (marker colours, v2 lines nearly coincide, v1 normally shows amber stopped), ARCHITECTURE (poll is
+  fill=false), services/CLAUDE.md, prd.json US-003/US-009 criteria reworded (passes flags untouched).
+- Self-check executed:
+  - `grep -rn entitlement … services packages scripts docs prd.json` → only US-012's own title/AC text in
+    prd.json (after `rm -rf services/test-api/dist`, a gitignored stale build).
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 7, mock-billing 7, test-api 18,
+    webhook 6, benchmark 30 (104). Mutation: probe routed to the fill path → 4 test-api failures; restored.
+  - `make up` exit 0, 2,999,196 keys in 49 s. `?fill=false` u_0000001 → `source:"cache", variants:1`;
+    u_9999999 → 200 `source:"miss", hit:false, variants:0`; `&v=7` → 200; `/entitlement/u_0000001` → 404;
+    DBSIZE 2999197 before and after; no index key for u_9999999.
+  - `node scripts/capture-run.mjs v2 20 /tmp/run-v2.json` → frameCounts batch 1, batch-completed 1;
+    completion `state:"done"`, elapsedSec 1.34 (ts 1789388652954), dispatch elapsedSec 1.033; samples
+    continued to 19 s. NOTE the spec's jq (`.[]`, `t=="batch-dispatched"`) doesn't match reality: the
+    capture file is `{…, frames:[…]}` and the dispatch frame has always been `t:"batch"` — ran it as
+    `.frames[] | select(.t=="batch")`. Did not rename the frame.
+  - Browser: headless Chrome screenshot mid v2 run (via history frame) → grey dispatch line and green
+    "eviction completed (1,000 users, 0 keys)" ~0.3 s later on the second row, legible, legend shown
+    (0 keys: the capture run had already evicted the same users). v1 via CDP with the page open: Stop after
+    20 s took 935 ms (waited for the in-flight KEYS), `batch-completed state:"stopped" processed 11` at
+    20.844 s before `run-stopped`; chart shows the amber "eviction stopped after 11 of 1,000" line.
+    The status-strip counter fix came after that screenshot and was not re-screenshotted; the right-align
+    overflow branch was not exercised visually.
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact, chain refill byte-identical).
+- **Learnings for future iterations:**
+  - `Runner.stop()` clears `active` first, so anything "a poll will notice" never happens after a stop —
+    stop() has to do that observation itself.
+  - A stopped webhook job reports `state:"stopped"` immediately but `finishedAt` only when its in-flight
+    user returns; key "finished" off `finishedAt`, not `state`.
+  - runner.test.ts tests share one seeded DB 14 and run in order: a later test's batch users were already
+    evicted by an earlier one, so assert counters against the job, not against the fixture.
   - README still says "the eight build stories" — stale, untouched.
 ---

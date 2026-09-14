@@ -245,7 +245,7 @@
         "`make typecheck && make test && make verify` exit 0"
       ],
       "priority": 12,
-      "passes": false,
+      "passes": true,
       "notes": "Full specification: tasks/US-012.md"
     }
   ]
