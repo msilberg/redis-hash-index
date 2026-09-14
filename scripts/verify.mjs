@@ -192,7 +192,8 @@ async function main() {
   if (before.total === 0) die("the batch users own no keys before the run — fixture is wrong");
   if (before.indexPresent !== batchUsers) die(`expected ${batchUsers} index keys, found ${before.indexPresent}`);
 
-  const control = await getJson(`${TEST_API}/entitlement/${controlId}`);
+  // fill=false: the probe reads the cache and never refills it — a filling read would hide an eviction.
+  const control = await getJson(`${TEST_API}/subscription/${controlId}?fill=false`);
   if (!control.hit) die(`control user ${controlId} has no cache hit before the run: ${JSON.stringify(control)}`);
 
   log("4/7  start a v2 run and wait for the webhook job to reach done");
@@ -210,7 +211,7 @@ async function main() {
       `batch users still own keys after v2: ${after.cachePresent} cache + ${after.indexPresent} index`,
     );
   }
-  const controlAfter = await getJson(`${TEST_API}/entitlement/${controlId}`);
+  const controlAfter = await getJson(`${TEST_API}/subscription/${controlId}?fill=false`);
   if (!controlAfter.hit || controlAfter.variants < 1) {
     die(`control user ${controlId} lost its cache: ${JSON.stringify(controlAfter)}`);
   }

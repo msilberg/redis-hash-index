@@ -44,6 +44,11 @@ never `await` it in the handler.
   never sharing their Redis client. It self-schedules polls (`setTimeout` after each finishes), not
   `setInterval` — a v1 scan blocks a poll for many seconds and a fixed interval would stack them.
   `stop()` must also `POST /jobs/:id/stop` on the webhook or a v1 job grinds on for hours.
+- `batch-completed` is emitted once per run from the job's `finishedAt`, never from the poll time.
+  Stopping clears `active`, so no later poll sees the terminal state: `stop()` itself re-reads the job
+  (bounded by `pollTimeoutMs`) and emits it before `run-stopped`. A stopped job has `finishedAt: null`
+  until its in-flight user returns. The UI must match `batch-completed` by `runId` — it can arrive
+  after the next run started.
 - Test files run in parallel child processes: `seeder.test.ts` owns Redis DB 15, `runner.test.ts`
   owns DB 14. A new redis-touching test file needs its own DB number. (`ui.test.ts` is pure — no DB.)
 - The UI (US-007) is `src/ui.ts` exporting `UI_HTML` as a string, not a static file: the Dockerfile
@@ -79,8 +84,11 @@ never `await` it in the handler.
 
 ## test-api
 
-- `createApp(redis, origin)`: `/entitlement` is the SMEMBERS+MGET bystander the run driver and
-  `make verify` poll; `/subscription` is the `@Cache` read-through. Don't merge or rename them.
+- `createApp(redis, origin)`: one route, `/subscription/:userId`, in two modes. The default is the
+  `@Cache` read-through. `?fill=false` is the SMEMBERS+MGET bystander the run driver and `make verify`
+  poll (`readCachedVariants`, no decorator, no origin). The probe must NEVER fill: it would refill
+  users a v1 run is evicting and make verify's "keys are gone" assertion meaningless.
+  `read-path.test.ts` proves it writes nothing — keep that test mutation-sensitive (working origin).
 - `origin` is a `SubscriptionOrigin` (`src/subscription-service.ts`): `BillingClient` in production
   (`src/billing-client.ts` — every non-2xx except 404, timeout, refusal and bad envelope is an
   `OriginError`; 404 is `null`), a stub in tests. `SubscriptionParams` is the key contract: the route

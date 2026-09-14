@@ -93,18 +93,24 @@ async function waitFor(
 
 const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-/** A stand-in for test-api: reads the index exactly the way the real one does (SMEMBERS then MGET). */
+/** A stand-in for test-api's `?fill=false` probe: SMEMBERS then MGET, exactly like the real one. */
 function fakeTestApi(): Express {
   const app = express();
-  app.get("/entitlement/:userId", (req, res) => {
+  app.get("/subscription/:userId", (req, res) => {
     const userId = req.params.userId;
+    if (req.query.fill !== "false") {
+      res.status(500).json({ error: "the run driver must poll with fill=false" });
+      return;
+    }
     const key = index.indexKeyFor(TENANT, CATEGORY, userId);
     void (async () => {
       const members = await redis.smembers(key);
       const values = members.length > 0 ? await redis.mget(members) : [];
+      const hit = values.some((v) => v !== null);
       res.json({
         userId,
-        hit: values.some((v) => v !== null),
+        source: hit ? "cache" : "miss",
+        hit,
         variants: values.filter((v) => v !== null).length,
         latencyMs: 0.2,
       });
@@ -120,6 +126,8 @@ interface FakeJob {
   total: number;
   processed: number;
   removed: number;
+  finishedAt: string | null;
+  incomplete: unknown[];
 }
 
 /** A stand-in for webhook's v2 path: delegates to packages/cache, checks the stop flag between users. */
@@ -136,6 +144,8 @@ function fakeWebhook(): Express {
       total: userIds.length,
       processed: 0,
       removed: 0,
+      finishedAt: null,
+      incomplete: [],
     };
     jobs.set(job.jobId, job);
     void (async () => {
@@ -146,6 +156,7 @@ function fakeWebhook(): Express {
         job.removed += one.valuesUnlinked;
       }
       if (job.state === "running") job.state = "done";
+      job.finishedAt = new Date().toISOString();
     })();
     res.status(202).json({ jobId: job.jobId, mode: "v2", total: job.total });
   });
@@ -246,6 +257,67 @@ test("a v2 run polls test-api, dispatches the batch, and streams samples with jo
   }
 });
 
+test("a v2 run emits exactly one batch-completed frame at the job's finishedAt, and keeps polling", async () => {
+  const testApi = createServer(fakeTestApi());
+  const webhook = createServer(fakeWebhook());
+  const testApiUrl = await listen(testApi);
+  const webhookUrl = await listen(webhook);
+
+  const runner = new Runner(
+    seeder,
+    runnerConfig({ testApiBaseUrl: testApiUrl, webhookBaseUrl: webhookUrl, batchUsers: 40 }),
+  );
+  const frames: Array<Record<string, unknown>> = [];
+  runner.on("frame", (f: Record<string, unknown>) => frames.push(f));
+
+  try {
+    const start = runner.start("v2");
+    await waitFor(() => frames.some((f) => f.t === "batch-completed"), "batch-completed frame");
+    const completedIdx = frames.findIndex((f) => f.t === "batch-completed");
+    const completed = frames[completedIdx] as Record<string, unknown>;
+    const batch = frames.find((f) => f.t === "batch") as { webhookJobId: string; ts: number; elapsedSec: number };
+    const job = (await (await fetch(`${webhookUrl}/jobs/${batch.webhookJobId}`)).json()) as {
+      finishedAt: string;
+      removed: number;
+    };
+    const started = frames.find((f) => f.t === "run-started") as { ts: number };
+
+    assert.equal(completed.runId, start.runId);
+    assert.equal(completed.mode, "v2");
+    assert.equal(completed.state, "done");
+    assert.equal(completed.ts, Date.parse(job.finishedAt), "ts is the job's finishedAt, not the poll's");
+    assert.equal(completed.elapsedSec, Math.round((completed.ts as number) - started.ts) / 1000);
+    assert.equal(batch.elapsedSec, Math.round(batch.ts - started.ts) / 1000, "dispatch is fractional too");
+    assert.ok((completed.elapsedSec as number) >= batch.elapsedSec, "completion never precedes dispatch");
+    // removed is whatever the job reports — the earlier test already evicted these users from DB 14
+    assert.deepEqual(
+      [completed.processed, completed.total, completed.removed, completed.incomplete],
+      [40, 40, job.removed, 0],
+    );
+
+    // polling continues after completion, and later polls do not emit a second marker
+    const samplesAtCompletion = frames.filter((f) => f.t === "sample").length;
+    await waitFor(
+      () => frames.filter((f) => f.t === "sample").length >= samplesAtCompletion + 3,
+      "samples after completion",
+    );
+    assert.equal(runner.isRunning(), true, "the run does not auto-stop");
+
+    const history = runner.historyFrame();
+    assert.equal(history?.completedAt, completed.ts);
+    assert.equal(history?.completionState, "done");
+    assert.deepEqual(history?.completion, { processed: 40, total: 40, removed: completed.removed, incomplete: 0 });
+
+    await runner.stop();
+    assert.equal(frames.filter((f) => f.t === "batch-completed").length, 1);
+  } finally {
+    await runner.stop();
+    runner.removeAllListeners();
+    await closeServer(testApi);
+    await closeServer(webhook);
+  }
+});
+
 test("stop() aborts the run and calls the webhook stop endpoint", async () => {
   const testApi = createServer(fakeTestApi());
   const webhook = createServer(fakeWebhook());
@@ -282,6 +354,15 @@ test("stop() aborts the run and calls the webhook stop endpoint", async () => {
     };
     assert.ok(["stopped", "done"].includes(job.state));
     if (job.state === "stopped") assert.ok(job.processed < job.total);
+
+    // Stop ends polling, so stop() itself reports the completion — before run-stopped.
+    const completedIdx = frames.findIndex((f) => f.t === "batch-completed");
+    const stoppedIdx = frames.findIndex((f) => f.t === "run-stopped");
+    assert.ok(completedIdx >= 0 && completedIdx < stoppedIdx, "batch-completed precedes run-stopped");
+    const completed = frames[completedIdx] as Record<string, unknown>;
+    assert.equal(completed.state, job.state);
+    assert.equal(completed.processed, job.processed);
+    assert.equal(completed.total, 2000);
   } finally {
     await runner.stop();
     runner.removeAllListeners();

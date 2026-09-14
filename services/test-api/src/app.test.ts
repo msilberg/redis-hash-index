@@ -19,7 +19,8 @@ let baseUrl: string;
 
 before(async () => {
   await redis.flushdb();
-  // /entitlement never reaches the origin; the 400 cases below are rejected before it.
+  // `?fill=false` never reaches the origin, and the 400 cases below are rejected before it. Any call
+  // to it answers 502, so an accidental fill fails these tests loudly.
   const origin = { getActiveSubscription: () => Promise.reject(new Error("origin must not be called")) };
   const app = createApp(redis as unknown as RedisReader, origin);
   await new Promise<void>((resolve) => {
@@ -58,33 +59,47 @@ test("GET /health returns {ok:true}", async () => {
   assert.deepEqual(await res.json(), { ok: true });
 });
 
-test("GET /entitlement/:userId reports a hit, the variant count and a latency", async () => {
+test("GET /subscription/:userId?fill=false reports a cache hit, the variant count and a latency", async () => {
   await seedUser("u_0000001", 2);
-  const res = await fetch(`${baseUrl}/entitlement/u_0000001`);
+  const res = await fetch(`${baseUrl}/subscription/u_0000001?fill=false`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as Record<string, unknown>;
   assert.equal(body.userId, "u_0000001");
+  assert.equal(body.source, "cache");
   assert.equal(body.hit, true);
   assert.equal(body.variants, 2);
   assert.equal(typeof body.latencyMs, "number");
   assert.ok((body.latencyMs as number) >= 0);
+  assert.equal("subscription" in body, false);
 });
 
-test("GET /entitlement/:userId returns hit:false, variants:0 for an unseeded user", async () => {
-  const res = await fetch(`${baseUrl}/entitlement/u_9999999`);
+test("GET /subscription/:userId?fill=false is a 200 miss for an uncached user, not an error", async () => {
+  const res = await fetch(`${baseUrl}/subscription/u_9999999?fill=false`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as Record<string, unknown>;
+  assert.equal(body.source, "miss");
   assert.equal(body.hit, false);
   assert.equal(body.variants, 0);
 });
 
-test("GET /entitlement/:userId rejects a malformed id with 400", async () => {
-  const res = await fetch(`${baseUrl}/entitlement/bogus`);
-  assert.equal(res.status, 400);
+test("GET /subscription/:userId?fill=false ignores ?v= rather than rejecting it", async () => {
+  await seedUser("u_0000003", 1);
+  for (const v of ["2", "0", "two"]) {
+    const res = await fetch(`${baseUrl}/subscription/u_0000003?fill=false&v=${v}`);
+    assert.equal(res.status, 200, `v=${v}`);
+    const body = (await res.json()) as Record<string, unknown>;
+    assert.equal(body.variants, 1, `v=${v}`);
+  }
 });
 
 test("GET /subscription/:userId rejects a malformed id or query with 400 before touching the cache", async () => {
-  for (const path of ["/subscription/bogus", "/subscription/u_0000001?v=0", "/subscription/u_0000001?v=two"]) {
+  for (const path of [
+    "/subscription/bogus",
+    "/subscription/bogus?fill=false",
+    "/subscription/u_0000001?v=0",
+    "/subscription/u_0000001?v=two",
+    "/subscription/u_0000001?fill=no",
+  ]) {
     const res = await fetch(`${baseUrl}${path}`);
     assert.equal(res.status, 400, path);
   }

@@ -211,3 +211,37 @@ test("an origin error returns 502, caches nothing, and the next call still reach
   assert.equal(origin.calls, 2);
   assert.equal(await redis.dbsize(), 0);
 });
+
+test("the ?fill=false probe writes nothing: evicted stays evicted, however often it is polled", async () => {
+  // Another user's record, so "DBSIZE unchanged" is measured against a non-empty keyspace.
+  const bystander = "u_0000001";
+  assert.equal((await getSubscription(`${bystander}?v=1`)).body.source, "origin");
+  const evictedKeys = [cacheKey(USER, { v: 1 }), cacheKey(USER, { v: 2 })];
+  assert.equal((await getSubscription(`${USER}?v=1`)).body.source, "origin");
+  assert.equal((await getSubscription(`${USER}?v=2`)).body.source, "origin");
+
+  const invalidation = await index.invalidateEntities(TENANT, CATEGORY, [USER]);
+  assert.deepEqual(invalidation.incomplete, []);
+  assert.equal(invalidation.valuesUnlinked, 2);
+  const dbBefore = await redis.dbsize();
+  const callsBefore = origin.calls;
+
+  for (const query of ["fill=false", "fill=false&v=1", "fill=false&v=2", "v=1&fill=false", "fill=false"]) {
+    const { status, body } = await getSubscription(`${USER}?${query}`);
+    assert.equal(status, 200, query);
+    assert.deepEqual({ source: body.source, hit: body.hit, variants: body.variants }, {
+      source: "miss",
+      hit: false,
+      variants: 0,
+    }, query);
+  }
+
+  assert.equal(origin.calls, callsBefore, "the probe never calls the origin");
+  assert.equal(await redis.dbsize(), dbBefore, "the probe created no key");
+  assert.equal(await redis.exists(indexKey), 0, "no index set for the evicted user");
+  assert.equal(await redis.exists(...evictedKeys, cacheKey(USER, {})), 0, "no value for the evicted user");
+
+  // Control: the same route without the flag does fill, so the assertions above can fail.
+  assert.equal((await getSubscription(`${USER}?v=1`)).body.source, "origin");
+  assert.equal(await redis.dbsize(), dbBefore + 2);
+});

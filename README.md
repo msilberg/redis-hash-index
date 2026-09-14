@@ -69,16 +69,21 @@ Then press one of the two buttons and watch the chart. Press **Stop** when you h
 ## 3. What each run should look like
 
 The y axis is **latencyMs on a log scale** — the two modes differ by about four orders of
-magnitude and a linear axis makes v2 invisible. A shaded marker shows the moment the eviction
-batch was dispatched.
+magnitude and a linear axis makes v2 invisible. A grey dashed line marks the moment the eviction
+batch was dispatched; a second dashed line marks the moment the webhook job ended, coloured by how:
+green *completed*, amber *stopped*, red *failed*.
 
 **Measure hashed index eviction (v2)**. The latency line does not move.
 A thousand users are invalidated in well under a second. The chart is boring, which is the
-argument.
+argument. The dispatch and completion lines are almost on top of each other — the second label drops
+to its own row so both stay legible.
 
 **Measure legacy (KEYS) eviction (v1)**. At the full 2M+ fixture the
 latency line steps from about a millisecond to ~2 seconds on the very first scan and stays there,
 one step per user. The webhook `processed` counter crawls; its rate depends on the fixture and host.
+You will normally see the amber *eviction stopped after N of 1,000* line where you pressed Stop,
+because a thousand keyspace scans is not something you wait out: the fast run has a completion
+line, the slow one has the line you drew when you gave up.
 
 Actual browser captures from the default fixture (`SEED_KEYS=2000000`, seed 1, 1,999,196 cache
 records plus 1,000,000 index sets), taken on September 10, 2026 (UTC):

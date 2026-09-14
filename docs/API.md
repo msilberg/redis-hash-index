@@ -21,21 +21,6 @@ The fill chain: `benchmark --GET /subscription--> test-api --GET /subscription--
 The innocent bystander. It must use its **own Redis connection**, so that when a scan blocks the
 server this service is genuinely queued behind it rather than sharing a busy client.
 
-### `GET /entitlement/:userId`
-
-```jsonc
-// 200
-{
-  "userId": "u_0001234",
-  "hit": true,
-  "variants": 2,
-  "latencyMs": 0.41   // server-side, measured around the Redis call only
-}
-```
-
-Reads via the index (`SMEMBERS` then `MGET`). Never scans. `hit: false` with `variants: 0` after
-the user has been invalidated — that is the expected post-eviction state, not an error.
-
 ### `GET /subscription/:userId?v=1` — the read path
 
 A read-through fill in front of `mock-billing`. The route calls the `@Cache`-decorated
@@ -80,6 +65,32 @@ filled value is byte-identical to the bulk-seeded one.
 
 A request that joins another request's in-flight fill for the same key (single-flight) does not call
 the origin itself and reports `source: "cache"`, although its `latencyMs` includes that wait.
+
+### `GET /subscription/:userId?fill=false` — the cache probe
+
+The same route, reading the cache **without filling it**. This is what the benchmark's run driver
+polls once a second and what `make verify` checks the control user with.
+
+```jsonc
+// 200
+{
+  "userId": "u_0001234",
+  "source": "cache",   // "cache" | "miss"
+  "hit": true,
+  "variants": 2,       // live cached variants: SMEMBERS the index set, then MGET the members
+  "latencyMs": 0.41    // server-side, measured around the Redis calls only
+}
+// 400 — userId not ^u_\d{7}$, or fill is neither "true" nor "false"
+// 502 { "error": "…" } — the Redis read failed
+```
+
+`fill` defaults to `true` (the read path above). With `fill=false` there is no origin call, no write
+and no scan fallback, and `?v=` is ignored rather than rejected: the probe reports every variant the
+index references. `source: "miss"`, `hit: false`, `variants: 0` after the user has been invalidated
+is a 200 — it is the expected post-eviction state, not an error.
+
+**The probe must never fill.** During a v1 run a filling poll would refill the users the webhook is
+evicting, and `make verify`'s "the batch users' keys are gone" would fail or pass for the wrong reason.
 
 ### `GET /health` → `{"ok":true}`
 
@@ -209,11 +220,42 @@ Server pushes one JSON frame per second:
 
 ```jsonc
 { "t":"sample", "runId":"…", "mode":"v1", "ts":1757400000000,
-  "elapsedSec":12, "latencyMs":11040.2, "ok":true,
-  "job": { "processed":1, "total":1000, "state":"running" } }
+  "elapsedSec":12,             // whole seconds
+  "latencyMs":11040.2, "serverLatencyMs":0.4, "ok":true,
+  "job": { "processed":1, "total":1000, "removed":2, "incomplete":0,
+           "state":"running", "finishedAt":null } }
 ```
 
-Plus lifecycle frames: `{"t":"run-started",…}`, `{"t":"run-stopped",…}`, `{"t":"seed-progress",…}`.
+Plus lifecycle frames: `{"t":"run-started",…}`, `{"t":"run-stopped",…}`, `{"t":"seed-progress",…}`,
+`{"t":"batch-error",…}`, and the two chart markers:
 
-A client connecting mid-run receives a `{"t":"history","samples":[…]}` frame first so the chart
-redraws correctly on refresh.
+```jsonc
+// the eviction batch was accepted by the webhook
+{ "t":"batch", "runId":"…", "mode":"v2", "webhookJobId":"job_a1b2c3", "count":1000,
+  "ts":1789200002001, "elapsedSec":2.001 }
+
+// the webhook job reached a terminal state — exactly once per run
+{ "t":"batch-completed", "runId":"…", "mode":"v2",
+  "ts":1789200003123,          // Date.parse(job.finishedAt), not the poll that noticed
+  "elapsedSec":3.124,          // fractional, 3 decimals, from the run's startedAt
+  "state":"done",              // done | stopped | failed
+  "processed":1000, "total":1000, "removed":1998, "incomplete":0 }
+```
+
+Both marker frames carry a fractional `elapsedSec`, so a fast v2 completion can never render before
+its dispatch; `sample` frames stay on whole seconds. Polling continues after `batch-completed` — the
+run does not auto-stop. Stopping a run ends polling, so `POST /api/run/stop` itself waits (up to
+`POLL_TIMEOUT_MS`) for the stopped job's `finishedAt` — a v1 job only finishes once its in-flight
+scan returns — and emits `batch-completed` with `state:"stopped"` before `run-stopped`. If the job
+never reports `finishedAt` in that window, no completion is emitted.
+
+A client connecting mid-run receives a `history` frame first so the chart redraws correctly on
+refresh, both markers included:
+
+```jsonc
+{ "t":"history", "runId":"…", "mode":"v2", "startedAt":1789200000000, "webhookJobId":"job_a1b2c3",
+  "batchAt":1789200002001,     // null before dispatch
+  "completedAt":1789200003123, "completionState":"done",   // null until batch-completed
+  "completion": { "processed":1000, "total":1000, "removed":1998, "incomplete":0 },
+  "samples":[…] }
+```

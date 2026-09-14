@@ -1,13 +1,16 @@
-// The innocent bystander. It reads entitlements through the shared entity index and reports how
-// long Redis took, so that when the webhook blocks the server on an O(N) keyspace enumeration we
-// can watch it happen to a request that did nothing wrong.
+// test-api: one route per entity, `GET /subscription/:userId`, in two modes.
 //
-// It reads via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
+// The default mode is the read path (US-009, US-011): a read-through fill in front of mock-billing,
+// done entirely by the `@Cache` decorator on `SubscriptionService`. This controller never builds a
+// cache key for it.
+//
+// `?fill=false` is the innocent bystander the run driver polls (US-012): it reads through the shared
+// entity index and reports how long Redis took, so that when the webhook blocks the server on an O(N)
+// keyspace enumeration we can watch it happen to a request that did nothing wrong. It NEVER fills —
+// a filling probe would recreate the keys an eviction is removing.
+//
+// Reads go via SMEMBERS then MGET only. It never enumerates the keyspace — not even on an admin
 // route. See docs/REDIS-SCHEMA.md.
-//
-// `GET /subscription/:userId` is the read path (US-009, US-011): a read-through fill in front of
-// mock-billing, done entirely by the `@Cache` decorator on `SubscriptionService`. This controller
-// never builds a cache key for it.
 
 import { EntityIndexCacheStrategy, type RedisClient } from "@redis-hash-index/cache";
 import { CATEGORY, TENANT, type Subscription } from "@redis-hash-index/fixture";
@@ -40,27 +43,19 @@ export class TestApiController {
     res.json({ ok: true });
   };
 
-  getEntitlement = (req: Request, res: Response): void => {
+  getSubscription = (req: Request, res: Response): void => {
     const userId = req.params.userId;
     if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
       res.status(400).json({ error: "userId must match ^u_\\d{7}$" });
       return;
     }
-
-    void this.readEntitlement(userId)
-      .then((body) => {
-        res.json({ userId, ...body });
-      })
-      .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        res.status(502).json({ error: `redis read failed: ${message}` });
-      });
-  };
-
-  getSubscription = (req: Request, res: Response): void => {
-    const userId = req.params.userId;
-    if (typeof userId !== "string" || !USER_ID_RE.test(userId)) {
-      res.status(400).json({ error: "userId must match ^u_\\d{7}$" });
+    const fill = fillMode(req.query);
+    if (fill === null) {
+      res.status(400).json({ error: "fill must be true or false" });
+      return;
+    }
+    if (!fill) {
+      this.probe(userId, res);
       return;
     }
     const params = subscriptionParams(req.query);
@@ -80,13 +75,28 @@ export class TestApiController {
   };
 
   /**
-   * One entitlement read: SMEMBERS the entity's index set, then MGET the members. `latencyMs`
-   * measures only the Redis round trip, per docs/API.md.
+   * `?fill=false`: what the cache holds for this user, and nothing else. No decorator, no origin, no
+   * write. `?v=` is ignored — the probe reports every variant the index references.
    *
-   * `hit: false` with `variants: 0` after a user has been invalidated is the correct answer — it is
-   * never treated as an error and there is no scan fallback.
+   * `source: "miss"` with `variants: 0` after a user has been invalidated is the correct answer — it
+   * is never treated as an error and there is no scan fallback.
    */
-  private async readEntitlement(
+  private probe(userId: string, res: Response): void {
+    void this.readCachedVariants(userId)
+      .then((read) => {
+        res.json({ userId, source: read.hit ? "cache" : "miss", ...read });
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        res.status(502).json({ error: `redis read failed: ${message}` });
+      });
+  }
+
+  /**
+   * SMEMBERS the entity's index set, then MGET the members. `latencyMs` measures only the Redis
+   * round trip, per docs/API.md.
+   */
+  private async readCachedVariants(
     userId: string,
   ): Promise<{ hit: boolean; variants: number; latencyMs: number }> {
     const indexKey = this.index.indexKeyFor(TENANT, CATEGORY, userId);
@@ -99,11 +109,11 @@ export class TestApiController {
   }
 
   /**
-   * One read-through: the decorated call, then the entitlement read for the variant count.
+   * One read-through: the decorated call, then `readCachedVariants` for the variant count.
    *
    * The service is built per request over a probe around the shared origin, so this request can tell
    * whether it reached the origin and for how long — the decorator itself reports neither.
-   * `latencyMs` is the decorated call's wall time minus origin time, plus the entitlement read. A
+   * `latencyMs` is the decorated call's wall time minus origin time, plus the variant read. A
    * request that joins another request's in-flight fill (single-flight) never calls the origin, so
    * it reports `source: "cache"` although it waited on that fill.
    */
@@ -124,17 +134,25 @@ export class TestApiController {
       params,
     );
     const fillMs = elapsedMs(started) - (originMs ?? 0);
-    const entitlement = await this.readEntitlement(userId);
+    const cached = await this.readCachedVariants(userId);
 
     return {
       userId,
       source: originMs === undefined ? "cache" : "origin",
-      variants: entitlement.variants,
-      latencyMs: fillMs + entitlement.latencyMs,
+      variants: cached.variants,
+      latencyMs: fillMs + cached.latencyMs,
       ...(originMs === undefined ? {} : { originMs }),
       subscription,
     };
   }
+}
+
+/** `fill` defaults to true; only the literal strings "true" and "false" are accepted. */
+function fillMode(query: Request["query"]): boolean | null {
+  const { fill } = query;
+  if (fill === undefined || fill === "true") return true;
+  if (fill === "false") return false;
+  return null;
 }
 
 /**

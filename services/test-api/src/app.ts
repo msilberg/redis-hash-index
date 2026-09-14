@@ -11,7 +11,6 @@ export function createApp(redis: RedisReader, origin: SubscriptionOrigin): Expre
   app.disable("x-powered-by");
 
   app.get("/health", controller.health);
-  app.get("/entitlement/:userId", controller.getEntitlement);
   app.get("/subscription/:userId", controller.getSubscription);
 
   return app;

@@ -46,6 +46,18 @@ test("the chart is a canvas with a logarithmic y axis and a dispatch marker", ()
   assert.match(UI_HTML, /logarithmic/i);
 });
 
+test("a completion marker coloured by terminal state, labelled with the counters, with a legend", () => {
+  assert.match(UI_HTML, /f\.t === "batch-completed"/);
+  assert.match(UI_HTML, /C_DONE = "#3fb27f", C_STOPPED = "#e5a13d", C_FAILED = "#e5554e"/);
+  assert.match(UI_HTML, /"eviction completed \(" \+ fmtInt\(c\.processed\) \+ " users, " \+ fmtInt\(c\.removed\) \+ " keys\)"/);
+  assert.match(UI_HTML, /"eviction stopped after " \+ fmtInt\(c\.processed\) \+ " of " \+ fmtInt\(c\.total\)/);
+  assert.match(UI_HTML, /"eviction failed \\u2014 " \+ fmtInt\(c\.incomplete\) \+ " entities incomplete"/);
+  assert.match(UI_HTML, /padT \+ 16/); // the second label row
+  assert.match(UI_HTML, /id="marker-legend"/);
+  // history redraws both markers
+  assert.match(UI_HTML, /f\.completedAt != null/);
+});
+
 test("the three controls and the seed fallback are present", () => {
   assert.match(UI_HTML, /Measure legacy \(KEYS\) eviction/);
   assert.match(UI_HTML, /Measure hashed index eviction/);

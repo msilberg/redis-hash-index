@@ -43,8 +43,15 @@ console.error(`run started: ${JSON.stringify(started)} — capturing ${seconds}s
 
 await sleep(seconds * 1000);
 
+// The stop waits for the webhook job to finish its in-flight user, then emits batch-completed and
+// run-stopped — wait for run-stopped rather than a fixed delay, or a v1 capture loses both.
+const stopped = new Promise((resolve) => {
+  ws.addEventListener("message", (ev) => {
+    if (String(ev.data).includes('"t":"run-stopped"')) resolve();
+  });
+});
 await fetch(`${BASE}/api/run/stop`, { method: "POST" });
-await sleep(500);
+await Promise.race([stopped, sleep(35_000)]);
 ws.close();
 
 const samples = frames.filter((f) => f.t === "sample");

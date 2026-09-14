@@ -43,7 +43,7 @@
       "title": "test-api service",
       "description": "As the benchmark, I need an innocent bystander service reading the cache, so the blocking effect of a scan is observable from outside the scanning process.",
       "acceptanceCriteria": [
-        "GET /entitlement/:userId returns {userId,hit,variants,latencyMs} per docs/API.md",
+        "GET /subscription/:userId?fill=false returns {userId,source,hit,variants,latencyMs} per docs/API.md (originally a separate bystander route, folded into /subscription by US-012)",
         "It reads via SMEMBERS then MGET. It never calls KEYS or SCAN",
         "latencyMs measures only the Redis round trip, using process.hrtime.bigint()",
         "The service opens its OWN Redis connection, not shared with any other service",
@@ -182,7 +182,7 @@
         "test-api gains GET /subscription/:userId returning {userId,source:'cache'|'origin',variants,latencyMs,subscription}; originMs is present when source is 'origin'",
         "The route reads and fills through US-010's @Cache decorator; no second decorator or standalone readThrough() is introduced",
         "A failing origin returns 502 and NOTHING is written to Redis \u2014 no value, no index member",
-        "GET /entitlement/:userId is unchanged; test-api still never calls KEYS or SCAN",
+        "The non-filling cache probe (SMEMBERS+MGET) is unchanged; test-api still never calls KEYS or SCAN",
         "An integration test asserts a fill in flight across an invalidation leaves value and reference consistent and the value surviving to its TTL",
         "An integration test asserts an invalidation after a completed fill removes both value and reference",
         "An integration test asserts an origin error caches nothing and the next call still reaches the origin",

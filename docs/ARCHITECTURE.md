@@ -38,7 +38,8 @@ from the perpetrator (`webhook`). Collapse them into one service and the effect 
 the event loop.
 
 **The benchmark service drives, it does not measure itself.** It polls `test-api` over HTTP once
-a second and records the round trip. That includes HTTP overhead, which is honest: it is what a
+a second (`GET /subscription/:userId?fill=false`, a cache read that never fills — a filling poll
+would refill the users a run is evicting) and records the round trip. That includes HTTP overhead, which is honest: it is what a
 real caller experiences. `test-api` also returns its own server-side Redis latency so the chart
 can show both and the gap is visible.
 
