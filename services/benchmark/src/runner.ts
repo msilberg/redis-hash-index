@@ -12,7 +12,7 @@
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
 
-import { userIdFor } from "./fixture";
+import { userIdFor } from "@redis-hash-index/fixture";
 
 export type RunMode = "v1" | "v2";
 
@@ -21,7 +21,34 @@ export interface RunJobCounters {
   processed: number;
   total: number;
   removed: number;
+  /** Entities the job reported as failed (`incomplete.length`). */
+  incomplete: number;
   state: string;
+  /** ISO instant the job ended; null while running, and while a stopped job's in-flight user finishes. */
+  finishedAt: string | null;
+}
+
+export type CompletionState = "done" | "stopped" | "failed";
+
+const TERMINAL_STATES: readonly string[] = ["done", "stopped", "failed"] satisfies CompletionState[];
+
+/**
+ * Emitted once per run, when the driver first sees the webhook job in a terminal state with a
+ * `finishedAt`. `ts` is the job's own end instant, not the poll that noticed — on a v2 run the whole
+ * eviction is a fraction of the poll interval.
+ */
+export interface BatchCompletedFrame {
+  t: "batch-completed";
+  runId: string;
+  mode: RunMode;
+  ts: number;
+  /** Fractional, 3 decimals, like the dispatch marker's. */
+  elapsedSec: number;
+  state: CompletionState;
+  processed: number;
+  total: number;
+  removed: number;
+  incomplete: number;
 }
 
 export interface Sample {
@@ -45,6 +72,10 @@ export interface HistoryFrame {
   startedAt: number;
   batchAt: number | null;
   webhookJobId: string | null;
+  /** `ts` of the run's batch-completed frame, or null if the eviction has not finished. */
+  completedAt: number | null;
+  completionState: CompletionState | null;
+  completion: Pick<BatchCompletedFrame, "processed" | "total" | "removed" | "incomplete"> | null;
   samples: Sample[];
 }
 
@@ -101,7 +132,12 @@ interface ActiveRun {
   batchAt: number | null;
   webhookJobId: string | null;
   lastJob: RunJobCounters | null;
+  /** Set exactly once, when the batch-completed frame is emitted. */
+  completion: BatchCompletedFrame | null;
 }
+
+/** Marker positions are fractional seconds so completion can never render before dispatch. */
+const markerSec = (ts: number, startedAt: number): number => Math.round(ts - startedAt) / 1000;
 
 /** Emits `frame` (a {@link Sample} or a lifecycle frame) for the WebSocket hub to broadcast. */
 export class Runner extends EventEmitter {
@@ -136,6 +172,7 @@ export class Runner extends EventEmitter {
       batchAt: null,
       webhookJobId: null,
       lastJob: null,
+      completion: null,
     };
     this.active = run;
     this.samples = [];
@@ -153,7 +190,13 @@ export class Runner extends EventEmitter {
     return { runId: run.runId, mode, webhookJobId: null };
   }
 
-  /** Stop polling and tell the webhook to stop its job — otherwise a v1 job grinds on for hours. */
+  /**
+   * Stop polling and tell the webhook to stop its job — otherwise a v1 job grinds on for hours.
+   *
+   * No poll will run after this, so the stop itself waits (bounded) for the job's `finishedAt` and
+   * emits the batch-completed frame before `run-stopped`. A stopped v1 job only finishes once its
+   * in-flight keyspace enumeration returns.
+   */
   async stop(): Promise<StopResult> {
     const run = this.active;
     if (run === null) return { stopped: false };
@@ -177,6 +220,7 @@ export class Runner extends EventEmitter {
       } catch {
         // best effort — the run is stopped on our side regardless
       }
+      await this.awaitCompletion(run);
     }
 
     this.emit("frame", {
@@ -207,6 +251,17 @@ export class Runner extends EventEmitter {
       startedAt: run.startedAt,
       batchAt: run.batchAt,
       webhookJobId: run.webhookJobId,
+      completedAt: run.completion?.ts ?? null,
+      completionState: run.completion?.state ?? null,
+      completion:
+        run.completion === null
+          ? null
+          : {
+              processed: run.completion.processed,
+              total: run.completion.total,
+              removed: run.completion.removed,
+              incomplete: run.completion.incomplete,
+            },
       samples: [...this.samples],
     };
   }
@@ -238,7 +293,8 @@ export class Runner extends EventEmitter {
     let ok = false;
     let serverLatencyMs: number | null = null;
     try {
-      const res = await fetch(`${this.config.testApiBaseUrl}/subscription/${userId}`, {
+      // fill=false: the probe must never refill a user the webhook is evicting.
+      const res = await fetch(`${this.config.testApiBaseUrl}/subscription/${userId}?fill=false`, {
         signal: AbortSignal.timeout(this.config.pollTimeoutMs),
       });
       latencyMs = Number(process.hrtime.bigint() - started) / 1e6;
@@ -253,7 +309,8 @@ export class Runner extends EventEmitter {
 
     const job = await this.readJob(run);
 
-    if (this.active !== run) return; // stopped while this poll was in flight
+    if (this.active !== run) return; // stopped while this poll was in flight — stop() owns completion
+    this.observeCompletion(run, job);
 
     const now = Date.now();
     const sample: Sample = {
@@ -279,12 +336,14 @@ export class Runner extends EventEmitter {
         signal: AbortSignal.timeout(5_000),
       });
       if (res.ok) {
-        const body = (await res.json()) as Partial<RunJobCounters>;
+        const body = (await res.json()) as Partial<Omit<RunJobCounters, "incomplete">> & { incomplete?: unknown };
         const job: RunJobCounters = {
           processed: Number(body.processed ?? 0),
           total: Number(body.total ?? 0),
           removed: Number(body.removed ?? 0),
+          incomplete: Array.isArray(body.incomplete) ? body.incomplete.length : 0,
           state: typeof body.state === "string" ? body.state : "unknown",
+          finishedAt: typeof body.finishedAt === "string" ? body.finishedAt : null,
         };
         run.lastJob = job;
         return job;
@@ -293,6 +352,36 @@ export class Runner extends EventEmitter {
       // a transient read failure shouldn't blank the counters mid-chart
     }
     return run.lastJob;
+  }
+
+  /** Emit the run's one batch-completed frame if `job` has ended. Synchronous, so it cannot double-fire. */
+  private observeCompletion(run: ActiveRun, job: RunJobCounters | null): void {
+    if (run.completion !== null || job === null || !TERMINAL_STATES.includes(job.state)) return;
+    const ts = job.finishedAt === null ? Number.NaN : Date.parse(job.finishedAt);
+    if (Number.isNaN(ts)) return; // stopped, but the in-flight user has not finished yet
+    run.completion = {
+      t: "batch-completed",
+      runId: run.runId,
+      mode: run.mode,
+      ts,
+      elapsedSec: markerSec(ts, run.startedAt),
+      state: job.state as CompletionState,
+      processed: job.processed,
+      total: job.total,
+      removed: job.removed,
+      incomplete: job.incomplete,
+    };
+    this.emit("frame", run.completion);
+  }
+
+  /** After a stop: re-read the job until it has a `finishedAt`, for at most `pollTimeoutMs`. */
+  private async awaitCompletion(run: ActiveRun): Promise<void> {
+    const deadline = Date.now() + this.config.pollTimeoutMs;
+    while (run.completion === null) {
+      this.observeCompletion(run, await this.readJob(run));
+      if (run.completion !== null || Date.now() >= deadline) return;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
   }
 
   private async dispatchBatch(): Promise<void> {
@@ -324,7 +413,7 @@ export class Runner extends EventEmitter {
         webhookJobId: body.jobId,
         count,
         ts: run.batchAt,
-        elapsedSec: Math.round((run.batchAt - run.startedAt) / 1000),
+        elapsedSec: markerSec(run.batchAt, run.startedAt),
       });
     } catch (err) {
       if (this.active !== run) return;

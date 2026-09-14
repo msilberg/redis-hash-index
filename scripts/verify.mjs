@@ -8,7 +8,9 @@
 //   5. assert: every cache key AND index key for the batch users is gone,
 //              an untouched control user still has its keys,
 //              DBSIZE dropped by exactly the number of keys those users owned
-//   6. docker compose down -v (always, even on failure)
+//   6. take a bulk-seeded user, invalidate it, refill it through test-api -> mock-billing, and
+//      assert every stored value is byte-identical to what the bulk writer wrote
+//   7. docker compose down -v (always, even on failure)
 //
 // Exits non-zero on any failure. A verify script that always passes is worse than none.
 
@@ -167,12 +169,12 @@ function keyCensus(count) {
 async function main() {
   process.env.SEED_KEYS = SEED_KEYS;
 
-  log(`1/6  docker compose up -d --build (SEED_KEYS=${SEED_KEYS})`);
+  log(`1/7  docker compose up -d --build (SEED_KEYS=${SEED_KEYS})`);
   compose("up", "-d", "--build");
   log("waiting for every container to report healthy");
   await waitHealthy(240_000);
 
-  log(`2/6  seed SEED_KEYS=${SEED_KEYS} and wait for ready`);
+  log(`2/7  seed SEED_KEYS=${SEED_KEYS} and wait for ready`);
   await postJson(`${BASE}/api/seed`);
   const status = await waitSeedReady(240_000);
   console.error(JSON.stringify(status));
@@ -181,7 +183,7 @@ async function main() {
   if (batchUsers <= 0) die("seed reported zero users");
   const controlId = `u_${String(status.users - 1).padStart(7, "0")}`; // last seeded user, never in the batch
 
-  log("3/6  capture DBSIZE and the batch users' key census");
+  log("3/7  capture DBSIZE and the batch users' key census");
   const dbBefore = Number(redis("dbsize"));
   const before = keyCensus(batchUsers);
   console.error(
@@ -190,10 +192,11 @@ async function main() {
   if (before.total === 0) die("the batch users own no keys before the run — fixture is wrong");
   if (before.indexPresent !== batchUsers) die(`expected ${batchUsers} index keys, found ${before.indexPresent}`);
 
-  const control = await getJson(`${TEST_API}/entitlement/${controlId}`);
+  // fill=false: the probe reads the cache and never refills it — a filling read would hide an eviction.
+  const control = await getJson(`${TEST_API}/subscription/${controlId}?fill=false`);
   if (!control.hit) die(`control user ${controlId} has no cache hit before the run: ${JSON.stringify(control)}`);
 
-  log("4/6  start a v2 run and wait for the webhook job to reach done");
+  log("4/7  start a v2 run and wait for the webhook job to reach done");
   const run = await postJson(`${BASE}/api/run`, { mode: "v2" });
   console.error(`run: ${JSON.stringify(run)}`);
   const jobId = await waitBatchJobId(60_000);
@@ -201,14 +204,14 @@ async function main() {
   console.error(`webhook job: ${JSON.stringify(job)}`);
   await postJson(`${BASE}/api/run/stop`);
 
-  log("5/6  assert the batch users' keys are gone and the control user survives");
+  log("5/7  assert the batch users' keys are gone and the control user survives");
   const after = keyCensus(batchUsers);
   if (after.total !== 0) {
     die(
       `batch users still own keys after v2: ${after.cachePresent} cache + ${after.indexPresent} index`,
     );
   }
-  const controlAfter = await getJson(`${TEST_API}/entitlement/${controlId}`);
+  const controlAfter = await getJson(`${TEST_API}/subscription/${controlId}?fill=false`);
   if (!controlAfter.hit || controlAfter.variants < 1) {
     die(`control user ${controlId} lost its cache: ${JSON.stringify(controlAfter)}`);
   }
@@ -221,7 +224,37 @@ async function main() {
   }
   if (job.processed !== batchUsers) die(`webhook processed ${job.processed}, expected ${batchUsers}`);
 
-  log("6/6  all assertions passed");
+  log("6/7  refill a bulk-seeded user through test-api -> mock-billing and compare byte for byte");
+  // Not the batch (0..batchUsers-1, filled by lazy-warm) and not the control: a bulk-phase user.
+  const chainId = `u_${String(Math.floor(status.users / 2)).padStart(7, "0")}`;
+  const chainIndex = `entityIndex::demo::activeSubscription::${chainId}`;
+  const chainKeys = redis("smembers", chainIndex).split("\n").filter(Boolean).sort();
+  if (chainKeys.length === 0) die(`${chainId} has no index members to refill`);
+  const bulkValues = new Map(chainKeys.map((key) => [key, redis("get", key)]));
+
+  const chainJob = await postJson(`${WEBHOOK}/v2/invalidate`, { userIds: [chainId] });
+  await waitJobDone(chainJob.jobId, 30_000);
+  if (Number(redis("exists", ...chainKeys, chainIndex)) !== 0) die(`${chainId} survived its invalidation`);
+
+  for (const key of chainKeys) {
+    const variant = /::\{"v":(\d+)\}$/.exec(key)?.[1];
+    if (variant === undefined) die(`unexpected params segment in ${key}`);
+    const read = await getJson(`${TEST_API}/subscription/${chainId}?v=${variant}`);
+    if (read.source !== "origin") die(`refill of ${key} did not reach the origin: ${JSON.stringify(read)}`);
+  }
+  for (const key of chainKeys) {
+    const refilled = redis("get", key);
+    if (refilled !== bulkValues.get(key)) {
+      die(`${key} differs after the refill\n  bulk:     ${bulkValues.get(key)}\n  refilled: ${refilled}`);
+    }
+  }
+  const refilledKeys = redis("smembers", chainIndex).split("\n").filter(Boolean).sort();
+  if (JSON.stringify(refilledKeys) !== JSON.stringify(chainKeys)) {
+    die(`${chainId} index after refill ${JSON.stringify(refilledKeys)}, expected ${JSON.stringify(chainKeys)}`);
+  }
+  console.error(`${chainId}: ${chainKeys.length} values refilled through the chain, byte-identical to the bulk seed`);
+
+  log("7/7  all assertions passed");
   down();
   console.error("\nVERIFY OK");
   process.exit(0);

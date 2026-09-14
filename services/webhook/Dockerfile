@@ -6,9 +6,11 @@ FROM node:22-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json tsconfig.base.json ./
 COPY packages/cache packages/cache
+COPY packages/fixture/package.json packages/fixture/package.json
 COPY services/webhook services/webhook
 COPY services/test-api/package.json services/test-api/package.json
 COPY services/benchmark/package.json services/benchmark/package.json
+COPY services/mock-billing/package.json services/mock-billing/package.json
 RUN npm ci
 RUN npm run build --workspace @redis-hash-index/webhook
 RUN npm prune --omit=dev

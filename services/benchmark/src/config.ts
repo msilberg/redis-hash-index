@@ -1,24 +1,14 @@
-// Static pieces of the Redis schema this service is pinned to. `demo` is the only tenant and
-// `activeSubscription` the only indexed category — see docs/REDIS-SCHEMA.md.
-export const TENANT = "demo";
-export const CATEGORY = "activeSubscription";
-
-// The `service` segment of a cache key names *who wrote the record*. In this demo that is always
-// `test-api` (the reader owns the record shape); the benchmark only seeds on its behalf.
-export const SERVICE = "test-api";
+// The schema constants live with the fixture generator in packages/fixture; re-exported for this service.
+export { CATEGORY, SERVICE, TENANT } from "@redis-hash-index/fixture";
 
 // Every cache string and every index set is armed with this TTL — see docs/REDIS-SCHEMA.md.
 export const CACHE_TTL_SECONDS = 3600;
 
-// Plan ids are cycled deterministically over this list, one step per cache record.
-export const PLAN_IDS = ["pro-monthly", "pro-yearly", "team-monthly", "gen-ai-100k"] as const;
-
-// SEED_KEYS is a count of cache *records*; user count is derived so users * averageVariants ≈ SEED_KEYS.
-export const AVERAGE_VARIANTS = 2;
-
 // The marker key. Its presence means a completed seed survived a restart; `POST /api/seed/reset`
 // flushes the db and clears it.
 export const MARKER_KEY = "seed::marker";
+
+export type SeedMode = "bulk" | "lazy";
 
 export interface Config {
   port: number;
@@ -26,8 +16,15 @@ export interface Config {
   seedKeys: number;
   seedValue: number;
   pipelineSize: number;
-  // Run driver (US-006). In compose the services address each other by container name.
+  // Seeding modes (US-010).
+  seedMode: SeedMode;
+  lazyConcurrency: number;
+  lazyMaxKeys: number;
+  lazyWarmUsers: number;
+  // In compose the services address each other by container name. The lazy phases fill through
+  // test-api (US-011) and check mock-billing's SEED_VALUE first; the run driver (US-006) polls test-api.
   testApiBaseUrl: string;
+  mockBillingBaseUrl: string;
   webhookBaseUrl: string;
   pollIntervalMs: number;
   batchDelayMs: number;
@@ -50,6 +47,12 @@ function intFromEnv(
   return value;
 }
 
+function seedModeFromEnv(raw: string | undefined): SeedMode {
+  if (raw === undefined || raw === "") return "bulk";
+  if (raw === "bulk" || raw === "lazy") return raw;
+  throw new Error(`invalid SEED_MODE: ${JSON.stringify(raw)} (want bulk | lazy)`);
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: intFromEnv(env.PORT, 3000, "PORT", 1, 65535),
@@ -58,7 +61,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     seedValue: intFromEnv(env.SEED_VALUE, 1, "SEED_VALUE", 0, 0xffff_ffff),
     // Buffer ~20k commands; registerMany splits these into bounded pipelined transactions.
     pipelineSize: intFromEnv(env.SEED_PIPELINE_SIZE, 20_000, "SEED_PIPELINE_SIZE", 1, 5_000_000),
+    // bulk pipelines the fixture; lazy fills every record through @Cache and is capped by LAZY_MAX_KEYS.
+    seedMode: seedModeFromEnv(env.SEED_MODE),
+    lazyConcurrency: intFromEnv(env.LAZY_CONCURRENCY, 16, "LAZY_CONCURRENCY", 1, 1024),
+    lazyMaxKeys: intFromEnv(env.LAZY_MAX_KEYS, 50_000, "LAZY_MAX_KEYS", 1, 1_000_000_000),
+    // Users 0..LAZY_WARM_USERS-1 — the eviction batch — are always filled through test-api's @Cache.
+    lazyWarmUsers: intFromEnv(env.LAZY_WARM_USERS, 1000, "LAZY_WARM_USERS", 0, 10_000_000),
     testApiBaseUrl: env.TEST_API_URL ?? "http://test-api:3001",
+    mockBillingBaseUrl: env.MOCK_BILLING_URL ?? "http://mock-billing:3003",
     webhookBaseUrl: env.WEBHOOK_URL ?? "http://webhook:3002",
     pollIntervalMs: intFromEnv(env.POLL_INTERVAL_MS, 1000, "POLL_INTERVAL_MS", 10, 3_600_000),
     batchDelayMs: intFromEnv(env.BATCH_DELAY_MS, 1000, "BATCH_DELAY_MS", 0, 3_600_000),

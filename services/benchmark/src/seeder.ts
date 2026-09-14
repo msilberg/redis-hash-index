@@ -1,20 +1,42 @@
-// The seeder — a small state machine that writes the deterministic fixture into Redis in pipelined
-// batches, inspecting every reply, and records a marker so a container restart does not reseed.
-// See US-005.md and docs/REDIS-SCHEMA.md.
+// The seeder — a small state machine that writes the deterministic fixture into Redis, inspecting
+// every reply, and records a marker so a container restart does not reseed.
+//
+// Two paths write the same records (US-010, US-011). `bulk` pipelines ~20k commands per round trip —
+// the only way 2M records land in about a minute. `lazy` asks test-api for each record over HTTP, and
+// test-api's @Cache fills it from mock-billing: two network hops, one GET, one origin call and one
+// MULTI per record, so it is capped at LAZY_MAX_KEYS. In both modes the first LAZY_WARM_USERS users —
+// the eviction batch — are filled that way as a final `lazy-warm` phase. See US-005.md, US-010.md,
+// US-011.md and docs/REDIS-SCHEMA.md.
 
 import { EventEmitter } from "node:events";
 
-import type { EntityIndex, Registration } from "@redis-hash-index/cache";
+import type { EntityIndexCacheStrategy, Registration } from "@redis-hash-index/cache";
+import {
+  expectedTotals,
+  generateUsers,
+  userCount,
+  userIdFor,
+  variantsFor,
+  type ExpectedTotals,
+} from "@redis-hash-index/fixture";
 
-import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT } from "./config";
-import { expectedTotals, generateUsers, type ExpectedTotals } from "./fixture";
+import { CACHE_TTL_SECONDS, CATEGORY, MARKER_KEY, TENANT, type SeedMode } from "./config";
+import { OriginFailedError } from "./lazy-filler";
 
 export type SeedState = "idle" | "seeding" | "ready" | "failed";
+
+/** `bulk` / `lazy` is the main fill; `lazy-warm` is the decorator fill of the eviction batch. */
+export type SeedPhase = SeedMode | "lazy-warm";
 
 export interface SeedStatus {
   state: SeedState;
   /** SEED_KEYS — the requested cache-record count. */
   targetKeys: number;
+  seedMode: SeedMode;
+  /** The phase running now, or the last one that ran. Absent before any seed. */
+  phase?: SeedPhase;
+  /** Records test-api answered 502 for during a lazy fill (e.g. mock-billing's fail user). Never cached. */
+  originFailures: number;
   users: number;
   cacheKeys: number;
   indexKeys: number;
@@ -31,11 +53,14 @@ export interface SeedProgressFrame {
   done: number;
   total: number;
   percent: number;
+  phase?: SeedPhase;
 }
 
 export interface SeedMarker {
   seedValue: number;
   targetKeys: number;
+  seedMode: SeedMode;
+  originFailures: number;
   users: number;
   cacheKeys: number;
   indexKeys: number;
@@ -55,12 +80,38 @@ export interface SeederConfig {
   seedKeys: number;
   seedValue: number;
   pipelineSize: number;
+  seedMode: SeedMode;
+  lazyConcurrency: number;
+  lazyMaxKeys: number;
+  lazyWarmUsers: number;
+}
+
+/** Per-seed overrides of the container's SEED_MODE / SEED_KEYS (`POST /api/seed` body). */
+export interface SeedOverrides {
+  seedMode?: SeedMode;
+  seedKeys?: number;
+}
+
+/** How the lazy paths fill one record — `TestApiFiller` (HTTP through test-api) in production. */
+export interface LazyFiller {
+  /** The SEED_VALUE the origin generates from; checked against ours before any lazy request. */
+  originSeedValue(): Promise<number>;
+  /** Fill one record. Throws {@link OriginFailedError} when the origin failed and nothing was cached. */
+  fill(userId: string, variant: number): Promise<void>;
 }
 
 export class AlreadySeedingError extends Error {
   constructor() {
     super("a seed is already in progress");
     this.name = "AlreadySeedingError";
+  }
+}
+
+/** A seed request refused before anything was flushed — e.g. `lazy` above LAZY_MAX_KEYS. */
+export class SeedRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SeedRefusedError";
   }
 }
 
@@ -71,13 +122,20 @@ export class Seeder extends EventEmitter {
   private total = 0;
   private expected: ExpectedTotals = { users: 0, cacheKeys: 0, indexKeys: 0 };
   private error: string | undefined;
+  private seedKeys: number;
+  private seedMode: SeedMode;
+  private phase: SeedPhase | undefined;
+  private originFailures = 0;
 
   constructor(
     private readonly redis: SeederRedis,
-    private readonly index: EntityIndex,
+    private readonly index: EntityIndexCacheStrategy,
+    private readonly filler: LazyFiller,
     private readonly config: SeederConfig,
   ) {
     super();
+    this.seedKeys = config.seedKeys;
+    this.seedMode = config.seedMode;
   }
 
   /** Load a marker left by a previous completed seed so status reports `ready` after a restart. */
@@ -91,6 +149,9 @@ export class Seeder extends EventEmitter {
       return; // a corrupt marker just means "not seeded" — a reseed will overwrite it
     }
     this.state = "ready";
+    this.seedKeys = marker.targetKeys;
+    this.seedMode = marker.seedMode ?? "bulk";
+    this.originFailures = marker.originFailures ?? 0;
     this.expected = {
       users: marker.users,
       cacheKeys: marker.cacheKeys,
@@ -114,15 +175,61 @@ export class Seeder extends EventEmitter {
     return this.expected.users;
   }
 
-  /** Begin seeding in the background. Throws {@link AlreadySeedingError} if one is already running. */
-  start(): void {
+  /**
+   * Begin seeding in the background; resolves once the seed has been accepted. Rejects with
+   * {@link AlreadySeedingError} if one is already running, and with {@link SeedRefusedError} — before
+   * touching Redis — if `lazy` is asked for more than LAZY_MAX_KEYS, or if a lazy fill would run
+   * against an origin whose SEED_VALUE differs from ours.
+   */
+  async start(overrides: SeedOverrides = {}): Promise<void> {
     if (this.state === "seeding") throw new AlreadySeedingError();
+    const seedMode = overrides.seedMode ?? this.config.seedMode;
+    const seedKeys = overrides.seedKeys ?? this.config.seedKeys;
+    if (seedMode === "lazy" && seedKeys > this.config.lazyMaxKeys) {
+      throw new SeedRefusedError(
+        `SEED_MODE=lazy refuses SEED_KEYS=${seedKeys}: above LAZY_MAX_KEYS=${this.config.lazyMaxKeys} ` +
+          "(a lazy fill is one origin call and one MULTI per record) — use SEED_MODE=bulk or raise LAZY_MAX_KEYS",
+      );
+    }
+    // Claim the state before the first await, so a concurrent start() is refused while we check.
+    const previous = this.state;
     this.state = "seeding";
+    const lazyRequests = seedMode === "lazy" || Math.min(this.config.lazyWarmUsers, userCount(seedKeys)) > 0;
+    try {
+      if (lazyRequests) await this.assertOriginSeedValue();
+    } catch (err) {
+      this.state = previous;
+      throw err;
+    }
+    this.seedKeys = seedKeys;
+    this.seedMode = seedMode;
+    this.phase = undefined;
+    this.originFailures = 0;
     this.done = 0;
     this.error = undefined;
-    this.expected = expectedTotals(this.config.seedKeys, this.config.seedValue);
+    this.expected = expectedTotals(seedKeys, this.config.seedValue);
     this.total = this.expected.cacheKeys + this.expected.indexKeys;
     void this.run();
+  }
+
+  /**
+   * Three containers share SEED_VALUE. A mismatch would not fail loudly — it would fill records that
+   * differ from the bulk ones — so compare with mock-billing's before the first lazy request.
+   */
+  private async assertOriginSeedValue(): Promise<void> {
+    let origin: number;
+    try {
+      origin = await this.filler.originSeedValue();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new SeedRefusedError(`refusing to seed: cannot read mock-billing's SEED_VALUE before a lazy fill (${message})`);
+    }
+    if (origin !== this.config.seedValue) {
+      throw new SeedRefusedError(
+        `refusing to seed: mock-billing SEED_VALUE=${origin} differs from benchmark SEED_VALUE=${this.config.seedValue} ` +
+          "— lazily filled records would not match the bulk fixture. Start both with the same SEED_VALUE",
+      );
+    }
   }
 
   /** Flush the database and clear the marker. Refuses while seeding. */
@@ -134,13 +241,21 @@ export class Seeder extends EventEmitter {
     this.total = 0;
     this.expected = { users: 0, cacheKeys: 0, indexKeys: 0 };
     this.error = undefined;
+    this.phase = undefined;
+    this.originFailures = 0;
     this.emit("progress", this.progressFrame());
   }
 
   progressFrame(): SeedProgressFrame {
     const total = this.total;
     const percent = total === 0 ? 0 : Math.min(1, this.done / total);
-    return { t: "seed-progress", done: this.done, total, percent };
+    return {
+      t: "seed-progress",
+      done: this.done,
+      total,
+      percent,
+      ...(this.phase !== undefined ? { phase: this.phase } : {}),
+    };
   }
 
   async status(): Promise<SeedStatus> {
@@ -153,7 +268,10 @@ export class Seeder extends EventEmitter {
     }
     return {
       state: this.state,
-      targetKeys: this.config.seedKeys,
+      targetKeys: this.seedKeys,
+      seedMode: this.seedMode,
+      ...(this.phase !== undefined ? { phase: this.phase } : {}),
+      originFailures: this.originFailures,
       users: this.expected.users,
       cacheKeys: this.expected.cacheKeys,
       indexKeys: this.expected.indexKeys,
@@ -176,41 +294,34 @@ export class Seeder extends EventEmitter {
       // Start from a clean slate so the DBSIZE assertion is exact and a reseed is deterministic.
       await this.redis.flushdb();
 
-      let records: Registration[] = [];
-      let queuedUsers = 0;
-      const flush = async (): Promise<void> => {
-        if (records.length === 0) return;
-        await this.index.registerMany(records);
-        this.done += records.length + queuedUsers;
-        records = [];
-        queuedUsers = 0;
-      };
+      const users = userCount(this.seedKeys);
+      const warmUsers = Math.min(this.config.lazyWarmUsers, users);
 
-      const indexKeyFor = (userId: string): string =>
-        this.index.indexKeyFor(TENANT, CATEGORY, userId);
-
-      for (const user of generateUsers(this.config.seedKeys, this.config.seedValue, indexKeyFor)) {
-        for (const record of user.records) {
-          records.push({ ...record, ttlSeconds: CACHE_TTL_SECONDS });
-        }
-        queuedUsers += 1;
-        // Four commands per record. The shared writer further bounds each transaction.
-        if (records.length * 4 >= this.config.pipelineSize) await flush();
+      this.enterPhase(this.seedMode, users - warmUsers);
+      if (this.seedMode === "bulk") {
+        await this.fillBulk(warmUsers);
+      } else {
+        await this.fillLazy(warmUsers, users);
       }
-      await flush();
+
+      this.enterPhase("lazy-warm", warmUsers);
+      await this.fillLazy(0, warmUsers);
 
       const dbsize = await this.redis.dbsize();
       const expectedDbsize = this.expected.cacheKeys + this.expected.indexKeys;
       if (dbsize !== expectedDbsize) {
         throw new Error(
           `post-seed DBSIZE ${dbsize} does not match expected ${expectedDbsize} ` +
-            `(${this.expected.cacheKeys} cache + ${this.expected.indexKeys} index)`,
+            `(${this.expected.cacheKeys} cache + ${this.expected.indexKeys} index` +
+            `${this.originFailures > 0 ? `, after ${this.originFailures} origin failures` : ""})`,
         );
       }
 
       const marker: SeedMarker = {
         seedValue: this.config.seedValue,
-        targetKeys: this.config.seedKeys,
+        targetKeys: this.seedKeys,
+        seedMode: this.seedMode,
+        originFailures: this.originFailures,
         users: this.expected.users,
         cacheKeys: this.expected.cacheKeys,
         indexKeys: this.expected.indexKeys,
@@ -221,6 +332,7 @@ export class Seeder extends EventEmitter {
       this.done = this.total;
       this.state = "ready";
       this.emit("progress", this.progressFrame());
+      console.log(`[benchmark] seed ready: ${this.expected.cacheKeys} cache + ${this.expected.indexKeys} index keys`);
       this.emit("done", marker);
     } catch (err) {
       this.state = "failed";
@@ -229,5 +341,76 @@ export class Seeder extends EventEmitter {
     } finally {
       clearInterval(ticker);
     }
+  }
+
+  private enterPhase(phase: SeedPhase, users: number): void {
+    this.phase = phase;
+    const how = phase === "bulk" ? "pipelined" : `through test-api, concurrency ${this.config.lazyConcurrency}`;
+    console.log(`[benchmark] seed phase ${phase}: ${users} users ${how}`);
+    this.emit("progress", this.progressFrame());
+  }
+
+  /** Users `fromUser..` written by the shared writer in pipelined transactions. */
+  private async fillBulk(fromUser: number): Promise<void> {
+    let records: Registration[] = [];
+    let queuedUsers = 0;
+    const flush = async (): Promise<void> => {
+      if (records.length === 0) return;
+      await this.index.registerMany(records);
+      this.done += records.length + queuedUsers;
+      records = [];
+      queuedUsers = 0;
+    };
+
+    const indexKeyFor = (userId: string): string => this.index.indexKeyFor(TENANT, CATEGORY, userId);
+
+    for (const user of generateUsers(this.seedKeys, this.config.seedValue, indexKeyFor, fromUser)) {
+      for (const record of user.records) {
+        records.push({ ...record, ttlSeconds: CACHE_TTL_SECONDS });
+      }
+      queuedUsers += 1;
+      // Four commands per record. The shared writer further bounds each transaction.
+      if (records.length * 4 >= this.config.pipelineSize) await flush();
+    }
+    await flush();
+  }
+
+  /**
+   * Users `fromUser..toUser-1`, every variant filled through the filler. An {@link OriginFailedError}
+   * skips that record — test-api wrote nothing, and the expected totals shrink to match. Any other
+   * error (test-api unreachable, a Redis write failing inside it) aborts the seed.
+   */
+  private async fillLazy(fromUser: number, toUser: number): Promise<void> {
+    let next = fromUser;
+    let aborted = false;
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const i = next++;
+        if (aborted || i >= toUser) return;
+        const userId = userIdFor(i);
+        const variants = variantsFor(i, this.config.seedValue);
+        let filled = 0;
+        for (let v = 1; v <= variants; v += 1) {
+          try {
+            await this.filler.fill(userId, v);
+            filled += 1;
+          } catch (err) {
+            if (!(err instanceof OriginFailedError)) {
+              aborted = true; // stop the other workers writing into a seed that has already failed
+              throw err;
+            }
+            this.originFailures += 1;
+            this.expected.cacheKeys -= 1;
+            console.warn(`[benchmark] origin failed for ${userId} v${v}, nothing cached: ${err.message}`);
+          }
+          this.done += 1;
+        }
+        // An index set exists only if at least one of the user's records was written.
+        if (filled === 0) this.expected.indexKeys -= 1;
+        this.done += 1;
+      }
+    };
+    const workers = Math.min(this.config.lazyConcurrency, Math.max(0, toUser - fromUser));
+    await Promise.all(Array.from({ length: workers }, () => worker()));
   }
 }

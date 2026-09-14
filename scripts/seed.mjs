@@ -12,6 +12,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 const BASE = process.env.BENCHMARK_URL ?? "http://localhost:3000";
 const FORCE = process.env.FORCE === "1" || process.env.SEED_FORCE === "1";
+// SEED_MODE / SEED_KEYS set in this shell override the container's own for this seed, so
+// `SEED_MODE=lazy SEED_KEYS=50000 make reset seed` does what it says without recreating the container.
+const OVERRIDES = {
+  ...(process.env.SEED_MODE ? { seedMode: process.env.SEED_MODE } : {}),
+  ...(process.env.SEED_KEYS ? { seedKeys: Number(process.env.SEED_KEYS) } : {}),
+};
 const POLL_MS = 350;
 const TIMEOUT_MS = Number(process.env.SEED_TIMEOUT_MS ?? 20 * 60_000);
 
@@ -64,7 +70,8 @@ function line(status, startedAt) {
   const pct = status.state === "ready" ? 1 : Math.min(0.99, status.progress ?? 0);
   const secs = Math.round((Date.now() - startedAt) / 1000);
   const pctStr = `${Math.round(pct * 100)}`.padStart(3);
-  return `  seeding  [${bar(pct)}] ${pctStr}%   ${fmt(total * pct)} / ${fmt(total)} keys${memSuffix(status)}  ${secs}s`;
+  const phase = status.phase ? ` ${status.phase}`.padEnd(10) : "";
+  return `  seeding${phase} [${bar(pct)}] ${pctStr}%   ${fmt(total * pct)} / ${fmt(total)} keys${memSuffix(status)}  ${secs}s`;
 }
 
 process.on("SIGINT", () => {
@@ -81,9 +88,16 @@ async function main() {
     console.error(`  fixture already seeded: ${fmt(totalKeys(status))} keys${memSuffix(status)}  (make reset to reseed)`);
     return;
   } else {
-    const res = await fetch(`${BASE}/api/seed`, { method: "POST" });
+    const res = await fetch(`${BASE}/api/seed`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(OVERRIDES),
+    });
     // 409 = a seed started between our status read and this POST — fine, just follow its progress.
-    if (!res.ok && res.status !== 409) throw new Error(`POST /api/seed -> ${res.status}`);
+    if (!res.ok && res.status !== 409) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(`POST /api/seed -> ${res.status}${body.error ? `: ${body.error}` : ""}`);
+    }
   }
 
   const startedAt = Date.now();

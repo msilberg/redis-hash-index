@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { expectedTotals, generateUsers, userCount, userIdFor, variantsFor } from "./fixture";
+import { expectedTotals, generateUsers, serializeSubscription, userCount, userIdFor, variantsFor } from "./fixture";
 import { mulberry32 } from "./prng";
+import type { Subscription } from "./schema";
 
 const idxKey = (userId: string): string => `entityIndex::demo::activeSubscription::${userId}`;
 
@@ -78,4 +79,15 @@ test("generateUsers emits well-formed cache keys, values and index membership", 
     records += user.records.length;
   }
   assert.equal(records, totals.cacheKeys);
+});
+
+test("serializeSubscription fixes the key order and drops foreign fields", () => {
+  const [user] = [...generateUsers(2, 1, idxKey)];
+  assert.ok(user?.records[0]);
+  const parsed = JSON.parse(user.records[0].value) as Subscription;
+  const shuffled = { seats: parsed.seats, renewsAt: parsed.renewsAt, status: parsed.status, planId: parsed.planId, userId: parsed.userId };
+  assert.equal(serializeSubscription(shuffled), user.records[0].value);
+  assert.equal(serializeSubscription({ ...parsed, extra: true } as Subscription), user.records[0].value);
+  // What test-api does: parse the canonical string, so the decorator's JSON.stringify reproduces it.
+  assert.equal(JSON.stringify(JSON.parse(serializeSubscription(shuffled))), user.records[0].value);
 });

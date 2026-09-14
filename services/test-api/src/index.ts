@@ -1,5 +1,8 @@
+import { configureCache, type RedisClient } from "@redis-hash-index/cache";
+import { CATEGORY, SERVICE, TENANT } from "@redis-hash-index/fixture";
 import Redis from "ioredis";
 import { createApp, type RedisReader } from "./app";
+import { BillingClient } from "./billing-client";
 import { loadConfig } from "./config";
 
 const config = loadConfig();
@@ -13,7 +16,19 @@ redis.on("error", (err: Error) => {
   console.error(`[test-api] redis error: ${err.message}`);
 });
 
-const app = createApp(redis as unknown as RedisReader);
+// The @Cache decorator behind GET /subscription resolves its strategies from this registry at call
+// time. SERVICE is `test-api`, so a fill lands on exactly the key the fixture seeded.
+configureCache({
+  redis: redis as unknown as RedisClient,
+  service: SERVICE,
+  tenant: TENANT,
+  categories: [CATEGORY],
+});
+
+// test-api is the only writer of cache keys; what it writes on a miss comes from mock-billing over HTTP.
+const origin = new BillingClient({ baseUrl: config.mockBillingUrl, timeoutMs: config.billingTimeoutMs });
+
+const app = createApp(redis as unknown as RedisReader, origin);
 
 const server = app.listen(config.port, () => {
   console.log(`[test-api] listening on :${config.port}`);

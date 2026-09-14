@@ -44,6 +44,14 @@ export const UI_HTML = `<!doctype html>
     padding: 8px; height: 58vh; min-height: 320px;
   }
   canvas { width: 100%; height: 100%; display: block; }
+  #marker-legend {
+    display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 8px;
+    color: #8b98a6; font-size: 12px;
+  }
+  #marker-legend .sw {
+    display: inline-block; width: 0; height: 12px; margin-right: 6px;
+    border-left: 2px dashed; vertical-align: middle;
+  }
   #legend {
     margin-top: 18px; padding: 14px 16px; background: #10161f;
     border: 1px solid #21262d; border-radius: 8px; max-width: 780px;
@@ -78,6 +86,12 @@ export const UI_HTML = `<!doctype html>
 </div>
 
 <div id="chart-wrap"><canvas id="chart"></canvas></div>
+<div id="marker-legend">
+  <span><i class="sw" style="border-color:#9aa7b4"></i>eviction batch dispatched</span>
+  <span><i class="sw" style="border-color:#3fb27f"></i>eviction completed</span>
+  <span><i class="sw" style="border-color:#e5a13d"></i>eviction stopped before it finished</span>
+  <span><i class="sw" style="border-color:#e5554e"></i>eviction failed for some users</span>
+</div>
 
 <section id="legend">
   <p><span class="k">Legacy (KEYS):</span> latency steps from ~1 ms to seconds on the first scan and
@@ -91,7 +105,10 @@ export const UI_HTML = `<!doctype html>
 (function () {
   "use strict";
 
-  var C_V1 = "#e5554e", C_V2 = "#3fb27f", C_BATCH = "#e5a13d";
+  var C_V1 = "#e5554e", C_V2 = "#3fb27f", C_BATCH = "#9aa7b4";
+  // The completion marker is coloured by the job's terminal state: green must mean it finished.
+  var C_DONE = "#3fb27f", C_STOPPED = "#e5a13d", C_FAILED = "#e5554e";
+  var COMPLETION_COLORS = { done: C_DONE, stopped: C_STOPPED, failed: C_FAILED };
 
   var chart = document.getElementById("chart");
   // Prefer a software-backed canvas: accelerated Chrome canvases can lose chart pixels
@@ -102,7 +119,8 @@ export const UI_HTML = `<!doctype html>
     conn: "connecting",
     seed: null,          // last GET /api/seed/status
     seedProgress: null,  // last {t:'seed-progress'} frame
-    run: null,           // { runId, mode, startedAt, batchSec, stopped, samples: [] }
+    run: null,           // { runId, mode, startedAt, batchSec, completedSec, completionState,
+                         //   completion: {processed,total,removed,incomplete}, stopped, samples: [] }
     job: null            // last webhook job counters seen on a sample/history
   };
 
@@ -118,6 +136,29 @@ export const UI_HTML = `<!doctype html>
 
   function fmtInt(n) {
     return (n || 0).toLocaleString();
+  }
+
+  function markerSec(ts, startedAt) {
+    return Math.round(ts - startedAt) / 1000;
+  }
+
+  function newRun(runId, mode, startedAt) {
+    return {
+      runId: runId, mode: mode, startedAt: startedAt,
+      batchSec: null, completedSec: null, completionState: null, completion: null,
+      stopped: false, samples: []
+    };
+  }
+
+  function completionLabel(run) {
+    var c = run.completion || {};
+    if (run.completionState === "done") {
+      return "eviction completed (" + fmtInt(c.processed) + " users, " + fmtInt(c.removed) + " keys)";
+    }
+    if (run.completionState === "stopped") {
+      return "eviction stopped after " + fmtInt(c.processed) + " of " + fmtInt(c.total);
+    }
+    return "eviction failed \\u2014 " + fmtInt(c.incomplete) + " entities incomplete";
   }
 
   function powLabel(v) {
@@ -158,11 +199,7 @@ export const UI_HTML = `<!doctype html>
 
   function adoptRun(runId, mode, startedAt) {
     if (!state.run || state.run.runId !== runId) {
-      state.run = {
-        runId: runId, mode: mode,
-        startedAt: startedAt || Date.now(),
-        batchSec: null, stopped: false, samples: []
-      };
+      state.run = newRun(runId, mode, startedAt || Date.now());
     }
     return state.run;
   }
@@ -172,18 +209,17 @@ export const UI_HTML = `<!doctype html>
       state.seedProgress = f;
       if (f.percent >= 1) refreshStatus();
     } else if (f.t === "run-started") {
-      state.run = {
-        runId: f.runId, mode: f.mode, startedAt: f.ts,
-        batchSec: null, stopped: false, samples: []
-      };
+      state.run = newRun(f.runId, f.mode, f.ts);
       state.job = null;
     } else if (f.t === "history") {
-      state.run = {
-        runId: f.runId, mode: f.mode, startedAt: f.startedAt,
-        batchSec: f.batchAt != null ? Math.round((f.batchAt - f.startedAt) / 1000) : null,
-        stopped: false,
-        samples: (f.samples || []).slice()
-      };
+      state.run = newRun(f.runId, f.mode, f.startedAt);
+      state.run.batchSec = f.batchAt != null ? markerSec(f.batchAt, f.startedAt) : null;
+      if (f.completedAt != null) {
+        state.run.completedSec = markerSec(f.completedAt, f.startedAt);
+        state.run.completionState = f.completionState;
+        state.run.completion = f.completion;
+      }
+      state.run.samples = (f.samples || []).slice();
       var last = state.run.samples[state.run.samples.length - 1];
       if (last && last.job) state.job = last.job;
     } else if (f.t === "sample") {
@@ -192,6 +228,17 @@ export const UI_HTML = `<!doctype html>
       if (f.job) state.job = f.job;
     } else if (f.t === "batch") {
       adoptRun(f.runId, f.mode, f.ts - f.elapsedSec * 1000).batchSec = f.elapsedSec;
+    } else if (f.t === "batch-completed") {
+      // stop() can report a run's completion after the next run started; never adopt a stale run.
+      if (state.run && state.run.runId === f.runId) {
+        state.run.completedSec = f.elapsedSec;
+        state.run.completionState = f.state;
+        state.run.completion = {
+          processed: f.processed, total: f.total, removed: f.removed, incomplete: f.incomplete
+        };
+        // no sample follows a stop, so the status strip would otherwise stay on "running"
+        state.job = { processed: f.processed, total: f.total, removed: f.removed, state: f.state };
+      }
     } else if (f.t === "run-stopped") {
       if (state.run && state.run.runId === f.runId) state.run.stopped = true;
     }
@@ -280,6 +327,7 @@ export const UI_HTML = `<!doctype html>
     for (var i = 0; i < samples.length; i++) {
       if (samples[i].elapsedSec > maxX) maxX = samples[i].elapsedSec;
     }
+    if (run && run.completedSec != null && run.completedSec > maxX) maxX = Math.ceil(run.completedSec);
 
     var yMin = 0.1, yMax = 100;
     for (var j = 0; j < samples.length; j++) {
@@ -318,20 +366,47 @@ export const UI_HTML = `<!doctype html>
       ctx.fillText(xs + "s", X(xs), h - padB + 6);
     }
 
-    // batch marker
-    if (run && run.batchSec != null) {
-      var bx = X(run.batchSec);
-      ctx.strokeStyle = C_BATCH;
+    // markers: dispatch, then completion — dashed, full plot height
+    function marker(x, color) {
+      ctx.strokeStyle = color;
       ctx.setLineDash([4, 3]);
       ctx.beginPath();
-      ctx.moveTo(bx, padT);
-      ctx.lineTo(bx, padT + plotH);
+      ctx.moveTo(x, padT);
+      ctx.lineTo(x, padT + plotH);
       ctx.stroke();
       ctx.setLineDash([]);
+    }
+
+    var batchLabel = null; // { x, width } of the dispatch label, for the collision check
+    if (run && run.batchSec != null) {
+      var bx = X(run.batchSec);
+      var bText = "eviction batch dispatched";
+      var bWidth = ctx.measureText(bText).width;
+      marker(bx, C_BATCH);
       ctx.fillStyle = C_BATCH;
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
-      ctx.fillText("eviction batch dispatched", Math.min(bx + 4, w - padR - 150), padT + 2);
+      ctx.fillText(bText, Math.min(bx + 4, w - padR - bWidth), padT + 2);
+      batchLabel = { x: bx, width: bWidth };
+    }
+
+    if (run && run.completedSec != null) {
+      var cx = X(run.completedSec);
+      var cColor = COMPLETION_COLORS[run.completionState] || C_FAILED;
+      var cText = completionLabel(run);
+      var cWidth = ctx.measureText(cText).width;
+      marker(cx, cColor);
+      ctx.fillStyle = cColor;
+      ctx.textBaseline = "top";
+      // On v2 the two lines are a fraction of a second apart: drop to a second row rather than overlap.
+      var cRowY = batchLabel && Math.abs(cx - batchLabel.x) < batchLabel.width + 8 ? padT + 16 : padT + 2;
+      if (cx + 4 + cWidth > w - padR) {
+        ctx.textAlign = "right";
+        ctx.fillText(cText, Math.max(cx - 4, padL + cWidth), cRowY);
+      } else {
+        ctx.textAlign = "left";
+        ctx.fillText(cText, cx + 4, cRowY);
+      }
     }
 
     if (!samples.length) {

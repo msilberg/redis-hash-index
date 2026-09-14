@@ -15,6 +15,39 @@ Started: (not yet run)
   software rendering. Chrome's accelerated canvas failed to display the chart on this machine;
   switching the context restored full redraws. Verify canvas changes visually in Chrome.
 
+- `@Cache` resolves its strategies from a module-level registry at CALL time: every process that
+  calls a decorated method (service bootstrap, each test file) must `configureCache(...)` first, or
+  the call throws. The decorator builds keys from arguments — call `(userId, { v: N })` for the
+  fixture's `{"v":N}` records.
+- The fixture has two writers that must agree byte-for-byte: bulk (`registerMany` pipelines) and
+  test-api's `@Cache` filling from mock-billing. Both build records via `fixture.recordsFor` and
+  serialise via `serializeSubscription`. Keep test-api's `chain.test.ts` and `make verify` step 6 green.
+- Grep self-checks that forbid a name will still match the story spec describing it (`tasks/US-XXX.md`,
+  prd.json AC text). Don't rewrite specs to satisfy a grep; report the residual matches.
+
+- npm runs workspace `prepare` scripts IN PARALLEL. A workspace package that compiles against another
+  workspace's `dist/` cannot use `prepare` — `packages/fixture` has none; `make packages` (a prereq of
+  typecheck/test) builds cache then fixture, and consuming Dockerfiles `RUN npm run build --workspace
+  @redis-hash-index/fixture` after `npm ci`. Local typecheck alone won't catch this — `make up` did.
+- Services share code through `packages/*`, never by importing another service's workspace.
+- test-api has ONE route, `/subscription/:userId`, in two modes that must stay distinct: the default
+  `@Cache` read-through, and `?fill=false` (SMEMBERS+MGET probe, polled by the runner and verify) which
+  must never fill — a filling probe refills what an eviction removes. (`/entitlement` retired in US-012.)
+- UI changes CAN be verified in a browser here: `google-chrome --headless=new --screenshot=… --window-size=1400,1000
+  --virtual-time-budget=5000 http://localhost:3000/` for a mid-run page (history frame). To capture a state
+  that only a live page sees (e.g. after Stop), drive Chrome over CDP (`--remote-debugging-port`, Node's
+  global WebSocket, `Page.captureScreenshot`), then Read the PNG.
+
+- The fill chain is benchmark → test-api → mock-billing, all HTTP. benchmark's `Seeder` takes a
+  `LazyFiller` (`TestApiFiller` in prod; tests inject an in-process fake). `seeder.start()` is ASYNC
+  (seed-value check first) — attach `once(seeder,"done")` before `await seeder.start()`.
+- A new workspace must be added to EVERY Dockerfile's build stage as `COPY <ws>/package.json`, or
+  `npm ci` in the other images fails against the lockfile.
+- Compare expiries with `PEXPIRETIME` (absolute), not two `PTTL` reads — sequential PTTLs drift by a
+  millisecond and flake "index outlives value" assertions.
+- `tsc` never deletes stale `dist/` files: after moving a module out of a package, `rm -rf dist`, or
+  consumers still resolve the old export locally (Docker builds are clean and won't show it).
+
 Seeded from the specification before the first iteration. Add to this section whenever you learn
 something general and reusable — not story-specific details.
 
@@ -71,7 +104,7 @@ something general and reusable — not story-specific details.
 - benchmark service = Express app + `http.Server` + `ws` at `/ws`. `createApp({seeder})` returns the
   app; `attachWebSocket(server, seeder)` returns a hub with `broadcast` (US-006/007 reuse it).
 - The seeder is deterministic from `SEED_VALUE` (mulberry32 + an order-independent `hashInt`).
-  `services/benchmark/src/fixture.ts` is the single generator — changing it diverges every fixture.
+  `packages/fixture/src/fixture.ts` (was `services/benchmark/src/`) is the single generator — changing it diverges every fixture.
 - Seeder writes with `flushdb()` first, then asserts `DBSIZE === cacheKeys + indexKeys` BEFORE
   writing `seed::marker`. So live DBSIZE after a completed seed is that total **+ 1** (the marker).
 - `SEED_KEYS` counts cache *records*; users ≈ SEED_KEYS/2 (`averageVariants` = 2). Actual cacheKeys
@@ -501,4 +534,233 @@ something general and reusable — not story-specific details.
   - Concurrent workers must await a reply into a local variable before updating shared counters;
     counter += await operation() can overwrite another worker's update.
   - Browser screenshots arrive as JPEG bytes; preserve .jpg filenames rather than assuming PNG.
+---
+
+## 2026-09-13 - US-010
+- Branch: fast-forwarded `ralph/redis-hash-index-demo` to `spec/us-009-us-010` (which held the new
+  specs; ralph was its ancestor), then worked there.
+- `packages/cache` split into `redis.ts` (narrow client, now incl. `get`/`set EX`), `keys.ts`
+  (segment/TTL validation, chunk), `strategies/default.ts` (`DefaultCacheStrategy`: protected
+  readonly client, `get`, `set` validating TTL first), `strategies/entity-index.ts`
+  (`EntityIndexCacheStrategy extends DefaultCacheStrategy`, `set` override: foreign category →
+  `super.set`, owned → `registerMany` single MULTI, with the why-comment), `cache-decorator.ts`
+  (`CacheKey`/`TTL`/`CacheStrategy` enums, `configureCache`, `getCacheStrategy`,
+  `resetCacheConfiguration`, `canonicalJson`, `buildCacheKey`, `@Cache` standard decorator with
+  single-flight, never caching rejections/undefined, `null` only under `cacheNegative`).
+  `index.ts` is now a barrel. Renamed `EntityIndex` → `EntityIndexCacheStrategy` everywhere, no alias.
+- `services/benchmark`: `billing-provider.ts` (deterministic mock, `ORIGIN_LATENCY_MS`,
+  `ORIGIN_FAIL_USER` → `OriginError`, no Redis), `subscription-service.ts` (the decorated method),
+  `fixture.ts` gained `recordsFor`/`recordOrdinalFor` + `generateUsers(..., fromUser)` (output proven
+  byte-identical to the old generator). Seeder: `SEED_MODE` bulk|lazy, `LAZY_CONCURRENCY`,
+  `LAZY_MAX_KEYS` refusal (`SeedRefusedError` → 400, before any flush), then a `lazy-warm` phase over
+  users 0..LAZY_WARM_USERS-1 (bulk skips them so they really go through `@Cache`). Origin failures
+  skip the record and shrink the expected DBSIZE; any other error aborts. Status/marker/frames carry
+  `seedMode`, `phase`, `originFailures`. `POST /api/seed` accepts optional `{seedMode, seedKeys}`;
+  `scripts/seed.mjs` forwards `SEED_MODE`/`SEED_KEYS` from the shell so
+  `SEED_MODE=lazy SEED_KEYS=50000 make reset seed` works without recreating the container.
+- compose forwards the six new env vars. Docs: ARCHITECTURE "Cache strategies", REDIS-SCHEMA
+  (rename, CacheKey = category), API (seed body + status fields), README seeding env table.
+- `scripts/verify.mjs` was ALREADY broken on this branch: commit 24a47d0 renamed test-api's
+  `/entitlement/:userId` to `/subscription/:userId` but verify still called `/entitlement` (404).
+  Pointed verify at `/subscription/`. **US-009 conflict to resolve**: its spec says
+  `GET /entitlement/:userId` is unchanged and `/subscription/:userId` is a NEW read-through route —
+  but that path is now the SMEMBERS+MGET reader, and docs/API.md still documents `/entitlement`.
+- Files changed: packages/cache/src/{index,redis,keys,cache-decorator,cache-decorator.test,
+  index.test}.ts, packages/cache/src/strategies/{default,entity-index}.ts, packages/cache/CLAUDE.md,
+  services/benchmark/src/{billing-provider,billing-provider.test,subscription-service,fixture,config,
+  seeder,seeder.test,runner.test,app,index}.ts, services/{test-api,webhook}/src/{controller,app.test}.ts,
+  services/CLAUDE.md, docker-compose.yml, scripts/{seed,verify}.mjs, README.md,
+  docs/{API,ARCHITECTURE,REDIS-SCHEMA}.md, tasks/US-002.md, prd.json, progress.txt.
+- Self-check executed:
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, test-api 4, webhook 6, benchmark 33.
+  - `make up` (default 2M): exit 0, seeded 2,999,196 keys in 53s; logs show
+    `seed phase bulk: 999000 users` then `seed phase lazy-warm: 1000 users through @Cache`.
+  - Decorator in the container (ORIGIN latency 150): miss 181 ms originCalls=1, hit 1.7 ms
+    originCalls=1; value + index member written, TTL 3600.
+  - `ORIGIN_FAIL_USER=u_0000002 docker compose up -d benchmark` + reseed (50k): scan `*u_0000002*`
+    empty, status `originFailures:1`, DBSIZE 74960 (= 49960 + 24999 + marker); two direct calls both
+    reject and still no keys.
+  - Bulk vs lazy at SEED_KEYS=50000: both DBSIZE 74962, identical sha256 over all 74,961 keys+values
+    (`70a1a08f89647c82`), sampled bulk-phase and warm-phase values identical, TTLs 3595–3600. Lazy
+    seed took ~5s.
+  - `SEED_MODE=lazy SEED_KEYS=2000000 make seed` → 400 naming `LAZY_MAX_KEYS=50000`, fixture untouched.
+  - `grep experimentalDecorators|reflect-metadata` → only prd.json's AC text. `grep \bEntityIndex\b`
+    → only the US-010 spec (tasks/US-010.md) and its prd.json AC line, which describe the rename.
+  - `make verify` → VERIFY OK, exit 0 (after the /subscription fix above); v2 removed 2011, DBSIZE
+    drop 3011 exact — the evicted users were the lazy-warm ones.
+- **Learnings for future iterations:**
+  - tsx (esbuild 0.28) and tsc 5.9 both lower standard decorators under the existing tsconfig — no
+    config change needed. `ClassMethodDecoratorContext` types come with lib ES2022.
+  - Bulk-seeding the warm users and then "lazy-warming" them would be all cache hits: skip them in
+    the main phase so the decorator actually fills them.
+  - Env vars on the host reach the container only at `up`; `make seed` runs on the host, hence the
+    POST body overrides.
+  - A lazy worker pool must stop sibling workers after a fatal error, or they keep writing into a
+    seed already marked failed.
+---
+
+## 2026-09-13 - US-009
+- Route conflict resolved: commit 24a47d0 had renamed test-api's SMEMBERS+MGET reader to
+  `/subscription`, but the spec, prd AC and docs/API.md keep it at `/entitlement` and reserve
+  `/subscription` for the read-through. Restored `/entitlement` (runner, runner.test fake, verify.mjs
+  point back to it) and made `/subscription` the new route.
+- New workspace `packages/fixture`: `git mv`'d prng, fixture, billing-provider (+tests) and
+  subscription-service out of benchmark, plus `schema.ts` (TENANT/CATEGORY/SERVICE/PLAN_IDS/
+  AVERAGE_VARIANTS). benchmark `config.ts` re-exports TENANT/CATEGORY/SERVICE. `SubscriptionService`
+  now takes a `SubscriptionOrigin` interface; `SubscriptionParams` gained `includeAddons`.
+- test-api: `createApp(redis, origin)`; `index.ts` calls `configureCache` (service `test-api`, so fills
+  hit fixture keys) and builds `BillingProvider` from SEED_VALUE/ORIGIN_LATENCY_MS/ORIGIN_FAIL_USER
+  (forwarded by compose). `GET /subscription/:userId?includeAddons=&v=` → per-request
+  `SubscriptionService(probe)` to learn `source`/`originMs`; `latencyMs` = decorated call − origin +
+  the SMEMBERS+MGET variant read; 502 on origin error; 400 on bad id/query.
+- `src/read-path.test.ts` (DB 14): gated-origin fill across `invalidateEntities` → invalidation removed
+  the earlier variant, late fill lands value+reference (DBSIZE 2, SMEMBERS = [fillKey]), PTTL ≈ 3600 s,
+  index TTL ≥ value TTL, served from cache, next invalidation removes it; invalidation after a completed
+  fill removes both, next read hits origin; origin error → 502 twice, DBSIZE 0, origin called twice.
+- Makefile `packages` target; Dockerfiles copy/build packages/fixture; docs API/ARCHITECTURE ("Read
+  path")/README caveat + env note; packages/fixture/CLAUDE.md; services/CLAUDE.md test-api section.
+- Self-check executed:
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 10, test-api 8, webhook 6,
+    benchmark 23 (83; benchmark's 10 pure tests moved to fixture).
+  - Mutation: decorator strategy → DEFAULT made both fill/invalidation tests fail; restored → 8/8.
+  - First `make up` FAILED (fixture `prepare` raced cache's in `npm ci`); fixed as above. Second
+    `make up` exit 0, seeded 2,999,196 keys in 53s (unchanged).
+  - `curl /subscription/u_0000001?includeAddons=true` → source origin, originMs 0.29; again → cache
+    (twice); `?v=1` → cache, same record as the fixture; index lists both keys; value TTL 3600;
+    `/entitlement/u_0000001` → hit; `/subscription/bogus` → 400.
+  - `ORIGIN_FAIL_USER=u_0000002 docker compose up -d test-api` → 502. The literal spec check
+    ("`--scan '*u_0000002*'` no output") does not hold on a seeded fixture: u_0000002 already had its
+    bulk-seeded value + index — identical before and after the 502s. After evicting it through webhook
+    v2, two more 502s → scan prints nothing.
+  - `grep -rn "KEYS\|scan(" services/test-api/src` → no matches. `grep experimentalDecorators|
+    reflect-metadata` (excluding node_modules) → only prd.json's US-010 AC text.
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact).
+  - Re-read ARCHITECTURE "Read path" against read-path.test.ts: every listed claim is an assertion;
+    it says explicitly the test checks the TTL is armed, not that it waits an hour.
+- **Learnings for future iterations:**
+  - `@Cache`'s single-flight map is per decorated method (closure at decoration), not per instance, so
+    constructing a decorated service per request keeps single-flight and lets you wrap the origin.
+  - Spec self-checks written against an empty keyspace can be false on the seeded 2M fixture; prove
+    "wrote nothing" as before == after, or clear the entity first.
+  - README's docs table still says "the eight build stories" — stale but untouched.
+---
+
+## 2026-09-13 - US-011
+- New workspace `services/mock-billing` (:3003, Dockerfile, compose + healthcheck): `git mv`'d
+  `billing-provider.ts` (+test) → `src/provider.ts`; `src/envelope.ts` builds the snake_case envelope
+  (`sub_<id>_<v>`, `cus_<id>`, `current_term_end` = midnight UTC of `renewsAt`); `app.ts` = `/health`
+  `{ok,seedValue}` + `/subscription/:userId?v=` (400 bad id/v, 404 absent variant, 503 fail user;
+  `include_addons` accepted and ignored). Depends on fixture + express only. Env PORT, SEED_VALUE,
+  ORIGIN_LATENCY_MS, ORIGIN_FAIL_USER (moved here from test-api/benchmark).
+- `packages/fixture`: now prng/fixture/schema/index only, no cache dependency. `Subscription` type in
+  schema.ts; `serializeSubscription()` in fixture.ts, used by `recordsFor` (bulk) and test-api's mapper.
+- test-api: `src/subscription-service.ts` (moved; `SubscriptionParams = {v?}` only — `includeAddons`
+  dropped from the key contract), `src/billing-client.ts` (`BillingClient`, `OriginError`,
+  `toSubscription` normalising through `serializeSubscription`), config MOCK_BILLING_URL /
+  BILLING_TIMEOUT_MS. Route copies only `v` from the query. Probe uses `.finally()` instead of
+  try/return-await.
+- benchmark: `src/lazy-filler.ts` (`TestApiFiller`, `OriginFailedError` for a test-api 502); seeder
+  `LazyFiller {originSeedValue, fill}`; `start()` async, refuses (`SeedRefusedError` → 400, state
+  restored, nothing flushed) when mock-billing's seedValue differs or is unreachable — only if a lazy
+  request would happen. No `configureCache`/`SubscriptionService` in benchmark any more.
+- `return await` removed: `DefaultCacheStrategy.get`, decorator (pending join; the try/finally around
+  `load` became `.finally()` on the promise — wrapper stays `async` so sync throws still reject),
+  decorator test methods, subscription service, seeder.test `seedWith`, controller probe.
+- Tests: `billing-client.test.ts` (map, 404→null, non-2xx, header+body timeout, bad JSON/envelope,
+  ECONNREFUSED), `chain.test.ts` (DB 13; spawns mock-billing: bulk-write u_0000004's 3 records,
+  invalidate, refill via route with stray query params, byte-identical values/TTL/index; 404 null not
+  cached; 503 → 502 nothing cached), mock-billing app/provider tests, `lazy-filler.test.ts`, seeder
+  seed-value refusal (unit + HTTP 400). read-path.test now uses a fixture stub origin and v=1/v=2 on
+  u_0000004. `make verify` gained step 6: invalidate a bulk-phase user and refill through the chain,
+  byte compare.
+- Docs: ARCHITECTURE (new diagram, only-writer, why fixture stays shared, read-path mapping), API
+  (mock-billing routes + envelope, test-api mapping table, seed 400), REDIS-SCHEMA (grammar unchanged,
+  said explicitly), README (diagram, chain, env table with service column, ports), .env.example,
+  services/CLAUDE.md, packages/fixture/CLAUDE.md, root CLAUDE.md/AGENTS.md/prompt.md "four services".
+- Self-check executed:
+  - `grep -rn "return await" --include=*.ts packages services` → only index.test.ts:291.
+  - `grep -rn "ioredis\|redis" services/mock-billing/src` → 4 matches, ALL the
+    `@redis-hash-index/fixture` import lines (package scope contains "redis"); excluding those → none.
+    `npm ls ioredis --workspace mock-billing` → empty. Reported, not worked around.
+  - `grep -rn "@redis-hash-index/cache" packages/fixture services/mock-billing` → no matches.
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 7, mock-billing 7, test-api 17,
+    webhook 6, benchmark 28 (101).
+  - Mutations: mapper without serializeSubscription (key order changed) → chain test fails "refilled …
+    differs"; raw query merged into params → 1 fail. Restored → green.
+  - `make up` exit 0: five containers healthy, 2,999,196 keys seeded in 59 s, lazy-warm "through test-api".
+  - `curl :3003/health` → `{"ok":true,"seedValue":1}`; `:3003/subscription/u_0000001?v=1` → envelope;
+    `?v=2` → 404; `/bogus` → 400; `:3001/subscription/u_0000001?v=1` → source cache, value equals Redis.
+  - `docker compose stop mock-billing`: u_0000001 v1 still "cache"; `/subscription/u_0500000` → 502
+    (ENOTFOUND), DBSIZE 2999197 before and after, index members unchanged, `…::{}` absent. Restarted.
+  - `SEED_VALUE=2 docker compose up -d mock-billing && SEED_VALUE=1 make reset seed` → "POST /api/seed ->
+    400: refusing to seed: mock-billing SEED_VALUE=2 differs from benchmark SEED_VALUE=1 …", exit non-zero.
+  - Bulk vs lazy at 50k through docker: both DBSIZE 74962, identical sha256 over all 74,961 keys+values
+    (`d689487b17be930c`), same sampled value. Lazy seed now ~48 s (was ~5 s in-process: two HTTP hops).
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact; u_0012500's 2 values
+    refilled through the chain byte-identical).
+  - A later `make test` run failed once: read-path "index PTTL 3599996 < value PTTL 3599997" — two
+    sequential PTTL reads. Pre-existing flake from US-009; switched to PEXPIRETIME, 8/8 reruns + full
+    `make test` green.
+- **Learnings for future iterations:**
+  - Removing `return await` from a try/finally is not mechanical: the decorator's single-flight
+    cleanup would have run immediately. Chain `.finally()` onto the promise instead.
+  - The spec's mismatch self-check does `make reset` first, so a refusal there leaves an empty DB; the
+    refusal itself never flushes (tested with a seeded fixture).
+  - A container stopped by compose loses its DNS name: test-api sees ENOTFOUND, not ECONNREFUSED, and
+    the lookup takes ~3 s before the 502.
+  - README still says "the eight build stories" — stale, untouched.
+---
+
+## 2026-09-14 - US-012
+- test-api: `/entitlement` route, handler and its three tests deleted. `GET /subscription/:userId?fill=false`
+  → `{userId, source:"cache"|"miss", hit, variants, latencyMs}` via `readCachedVariants` (renamed from
+  `readEntitlement`, still used by the fill path). `fill` other than true/false → 400; `?v=` ignored in probe
+  mode. New app tests (hit, 200 miss, ?v= ignored, 400s) and read-path test "the ?fill=false probe writes
+  nothing" (working origin, evicts u_0000004, 5 probes, DBSIZE/index/values/origin calls unchanged, then a
+  control fill proves the test can fail).
+- runner: poll URL `?fill=false`; `RunJobCounters` + `incomplete` (count) + `finishedAt`; `BatchCompletedFrame`
+  (`total` added beside the spec's fields — the "stopped after N of M" label needs it); `observeCompletion`
+  (sync, once per run, only when terminal AND `finishedAt` parses); `stop()` → `awaitCompletion` (re-reads
+  the job every 100 ms up to `pollTimeoutMs`) so a UI Stop still yields the amber line, emitted before
+  `run-stopped`; `markerSec` fractional for `batch` and `batch-completed`; `HistoryFrame` gains
+  `completedAt`, `completionState`, `completion`.
+- UI: `C_DONE/C_STOPPED/C_FAILED`, `completionLabel`, second row at `padT + 16` when within the first
+  label's width, right-align on overflow, HTML `#marker-legend`, `newRun()` clears completion on
+  run-started, history restores it, `batch-completed` applied only to a matching runId and also updates
+  the status strip's job counters. Dispatch marker `C_BATCH` changed amber → grey (#9aa7b4): with
+  "stopped" amber by spec, two amber lines on a v1 run would be indistinguishable.
+- scripts: verify.mjs control check uses `?fill=false`; capture-run.mjs waits for `run-stopped` (≤35 s)
+  instead of a fixed 500 ms, or a v1 capture loses the completion frame.
+- Docs: API.md (probe section, `batch` + `batch-completed` + history shapes, stop semantics), README
+  (marker colours, v2 lines nearly coincide, v1 normally shows amber stopped), ARCHITECTURE (poll is
+  fill=false), services/CLAUDE.md, prd.json US-003/US-009 criteria reworded (passes flags untouched).
+- Self-check executed:
+  - `grep -rn entitlement … services packages scripts docs prd.json` → only US-012's own title/AC text in
+    prd.json (after `rm -rf services/test-api/dist`, a gitignored stale build).
+  - `make typecheck` exit 0; `make test` exit 0 — cache 36, fixture 7, mock-billing 7, test-api 18,
+    webhook 6, benchmark 30 (104). Mutation: probe routed to the fill path → 4 test-api failures; restored.
+  - `make up` exit 0, 2,999,196 keys in 49 s. `?fill=false` u_0000001 → `source:"cache", variants:1`;
+    u_9999999 → 200 `source:"miss", hit:false, variants:0`; `&v=7` → 200; `/entitlement/u_0000001` → 404;
+    DBSIZE 2999197 before and after; no index key for u_9999999.
+  - `node scripts/capture-run.mjs v2 20 /tmp/run-v2.json` → frameCounts batch 1, batch-completed 1;
+    completion `state:"done"`, elapsedSec 1.34 (ts 1789388652954), dispatch elapsedSec 1.033; samples
+    continued to 19 s. NOTE the spec's jq (`.[]`, `t=="batch-dispatched"`) doesn't match reality: the
+    capture file is `{…, frames:[…]}` and the dispatch frame has always been `t:"batch"` — ran it as
+    `.frames[] | select(.t=="batch")`. Did not rename the frame.
+  - Browser: headless Chrome screenshot mid v2 run (via history frame) → grey dispatch line and green
+    "eviction completed (1,000 users, 0 keys)" ~0.3 s later on the second row, legible, legend shown
+    (0 keys: the capture run had already evicted the same users). v1 via CDP with the page open: Stop after
+    20 s took 935 ms (waited for the in-flight KEYS), `batch-completed state:"stopped" processed 11` at
+    20.844 s before `run-stopped`; chart shows the amber "eviction stopped after 11 of 1,000" line.
+    The status-strip counter fix came after that screenshot and was not re-screenshotted; the right-align
+    overflow branch was not exercised visually.
+  - `make verify` → VERIFY OK, exit 0 (v2 removed 2011, DBSIZE drop 3011 exact, chain refill byte-identical).
+- **Learnings for future iterations:**
+  - `Runner.stop()` clears `active` first, so anything "a poll will notice" never happens after a stop —
+    stop() has to do that observation itself.
+  - A stopped webhook job reports `state:"stopped"` immediately but `finishedAt` only when its in-flight
+    user returns; key "finished" off `finishedAt`, not `state`.
+  - runner.test.ts tests share one seeded DB 14 and run in order: a later test's batch users were already
+    evicted by an earlier one, so assert counters against the job, not against the fixture.
+  - README still says "the eight build stories" — stale, untouched.
 ---

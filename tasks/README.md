@@ -18,6 +18,10 @@ succeeded rather than assuming it did.
 | [US-006](US-006.md) | benchmark — run driver |
 | [US-007](US-007.md) | benchmark — live UI |
 | [US-008](US-008.md) | End-to-end verification and README |
+| [US-010](US-010.md) | Cache strategies, the `@Cache` adapter, and a lazily-filled fixture |
+| [US-009](US-009.md) | test-api read path — the read-through route and the interleaving test |
+| [US-011](US-011.md) | mock-billing service, the S2S read chain, and no `return await` |
+| [US-012](US-012.md) | Retire `/entitlement`, and mark the end of the eviction on the chart |
 
 ## Working rules for every story
 

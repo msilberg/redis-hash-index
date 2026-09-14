@@ -109,7 +109,7 @@ If there are still stories with `passes: false`, end your response normally (ano
 # This Project — redis-hash-index
 
 A live demo comparing two ways to invalidate a Redis cache: an O(N) keyspace scan versus a
-per-entity index. Three slim Express services and one Redis, in Docker.
+per-entity index. Four slim Express services (one a fake billing provider) and one Redis, in Docker.
 
 ## Read these before writing code
 

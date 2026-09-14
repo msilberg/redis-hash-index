@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@redis-hash-index/cache": "*",
+    "@redis-hash-index/fixture": "*",
     "express": "^4.21.1",
     "ioredis": "^5.4.1"
   },
