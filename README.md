@@ -2,7 +2,7 @@
 
 ![Two benchmark runs: the legacy KEYS eviction stepping up by orders of magnitude while the indexed run stays flat](./docs/cover_image.png)
 
-There are two ways to invalidate a Redis cache, measured under load against a single Redis instance.
+There are two ways to invalidate a user related Redis cache, measured under load against a single Redis instance.
 
 - **v1 — the legacy path.** For each user, scan the whole keyspace with `KEYS *::<userId>::*`
   to find their cache keys, then delete the matches. O(N) per user, N = every key in Redis.
