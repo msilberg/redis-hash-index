@@ -86,7 +86,7 @@ because a thousand keyspace scans is not something you wait out: the fast run ha
 line, the slow one has the line you drew when you gave up.
 
 Actual browser captures from the default fixture (`SEED_KEYS=2000000`, seed 1, 1,999,196 cache
-records plus 1,000,000 index sets), taken on September 10, 2026 (UTC):
+records plus 1,000,000 index sets), taken on September 14, 2026 (UTC):
 
 ![Legacy eviction: a sustained seconds-scale latency rise after dispatch](docs/run-legacy.jpg)
 
