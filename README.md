@@ -24,20 +24,20 @@ Four Express services and one Redis, each in its own container:
                      ┌──────────────┐
    browser ─────────►│  benchmark   │ :3000   UI + WebSocket + seeder + run driver
                      └───┬──────┬───┘         (the bulk seed writes Redis directly)
-     1 poll/sec and      │      │  batch of user IDs
-     the lazy fills      │      └───────────────────┐
+     1 poll/sec and      │       │  batch of user IDs
+     the lazy fills      │       └──────────────────┐
                      ┌───▼──────────┐        ┌──────▼───────┐
-                     │   test-api   │ :3001  │   webhook    │ :3002
+                     │   test-api   │ :3001   │   webhook      │ :3002
                      └───┬──────┬───┘        └──────┬───────┘
-                         │      │ HTTP, on a miss   │
-                         │  ┌───▼──────────┐        │
-                         │  │ mock-billing │ :3003  │   the fake billing provider, no Redis
-                         │  └──────────────┘        │
-                         │ read · fill              │ delete
+                         │       │ HTTP, on a miss    │
+                         │  ┌───▼──────────┐         │
+                         │  │ mock-billing  │ :3003   │   the fake billing provider, no Redis
+                         │  └──────────────┘         │
+                         │ read · fill                │ delete
                          └────────────┬─────────────┘
                                       ▼
                                ┌─────────────┐
-                               │    redis    │ :6379   single instance, noeviction
+                               │    redis     │ :6379   single instance, noeviction
                                └─────────────┘
 ```
 
