@@ -1,7 +1,8 @@
-# redis-hash-index
+# Redis Cache Invalidation Demo
 
-Two ways to invalidate a Redis cache, measured under load, against one Redis.
-Despite the repository name, the per-entity index is a Redis **SET**, not a HASH.
+![Two benchmark runs: the legacy KEYS eviction stepping up by orders of magnitude while the indexed run stays flat](./docs/cover_image.png)
+
+There are two ways to invalidate a Redis cache, measured under load against a single Redis instance.
 
 - **v1 — the legacy path.** For each user, scan the whole keyspace with `KEYS *::<userId>::*`
   to find their cache keys, then delete the matches. O(N) per user, N = every key in Redis.
@@ -9,10 +10,10 @@ Despite the repository name, the per-entity index is a Redis **SET**, not a HASH
   (`entityIndex::demo::activeSubscription::<userId>`). Read the set, delete what it lists,
   `SREM` the names you read. O(k) per user, independent of keyspace size.
 
-The interesting part is not how long each takes. It is what happens to **everybody else** while
-it runs, because Redis executes commands on a single thread. `KEYS` over a few million keys holds
-that thread for seconds, and every other client — including ones doing nothing but a single `GET` —
-waits behind it.
+The interesting part is not how long each takes. It is what happens to **everybody else** while it
+runs, because Redis executes commands on a single thread. `KEYS` over a few million keys holds that
+thread for seconds, and every other client — including ones doing nothing but a single `GET` — waits
+behind it.
 
 ---
 
@@ -24,20 +25,20 @@ Four Express services and one Redis, each in its own container:
                      ┌──────────────┐
    browser ─────────►│  benchmark   │ :3000   UI + WebSocket + seeder + run driver
                      └───┬──────┬───┘         (the bulk seed writes Redis directly)
-     1 poll/sec and      │       │  batch of user IDs
-     the lazy fills      │       └──────────────────┐
+     1 poll/sec and      │      │  batch of user IDs
+     the lazy fills      │      ────────────────────┐
                      ┌───▼──────────┐        ┌──────▼───────┐
-                     │   test-api   │ :3001   │   webhook      │ :3002
+                     │   test-api   │ :3001  │   webhook    │ :3002
                      └───┬──────┬───┘        └──────┬───────┘
-                         │       │ HTTP, on a miss    │
-                         │  ┌───▼──────────┐         │
-                         │  │ mock-billing  │ :3003   │   the fake billing provider, no Redis
-                         │  └──────────────┘         │
-                         │ read · fill                │ delete
+                         │      │ HTTP, on a miss   │
+                         │  ┌───▼──────────┐        │
+                         │  │ mock-billing │ :3003  │   the fake billing provider, no Redis
+                         │  └──────────────┘        │
+                         │ read · fill              │ delete
                          └────────────┬─────────────┘
                                       ▼
                                ┌─────────────┐
-                               │    redis     │ :6379   single instance, noeviction
+                               │    redis    │ :6379   single instance, noeviction
                                └─────────────┘
 ```
 
